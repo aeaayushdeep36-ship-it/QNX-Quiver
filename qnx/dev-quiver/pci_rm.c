@@ -47,7 +47,6 @@ typedef struct {
 static int release_pci(quiver_pci_t *pci);
 
 static volatile sig_atomic_t stopping;
-static volatile sig_atomic_t health_check_due;
 
 static int health_timeout_handler(message_context_t *ctp, int code,
                                   unsigned flags, void *handle)
@@ -56,7 +55,6 @@ static int health_timeout_handler(message_context_t *ctp, int code,
     (void)code;
     (void)flags;
     (void)handle;
-    health_check_due = 1;
     return 0;
 }
 
@@ -540,6 +538,7 @@ static void check_device_health(dispatch_t *dispatch, int *attach_id,
                                 const resmgr_io_funcs_t *io_functions,
                                 int *unavailable_reported)
 {
+    static uint32_t recovery_probe_count;
     if (pci->handle != NULL) {
         pci_ba_t bars[6] = {{0}};
         int bar_count = (int)(sizeof(bars) / sizeof(bars[0]));
@@ -592,6 +591,12 @@ static void check_device_health(dispatch_t *dispatch, int *attach_id,
         if (!*unavailable_reported) {
             fprintf(stderr, "QNX-Quiver: waiting for PCI device/server recovery\n");
             *unavailable_reported = 1;
+        }
+        if (recovery_probe_count < 3) {
+            ++recovery_probe_count;
+            printf("QNX-Quiver: recovery probe %" PRIu32 " did not attach\n",
+                   recovery_probe_count);
+            fflush(stdout);
         }
         return;
     }
@@ -759,27 +764,22 @@ int main(void)
             exit_status = EXIT_FAILURE;
             break;
         }
-        if (dispatch_handler(context) == -1) {
-            if (errno == ETIMEDOUT) {
-                health_check_due = 0;
-                if (!stopping) {
-                    check_device_health(dispatch, &attach_id, &device, &pci,
-                                        &resource_attributes, &connect_functions,
-                                        &io_functions, &unavailable_reported);
-                }
-                continue;
-            }
-            perror("QNX-Quiver: dispatch_handler");
-            exit_status = EXIT_FAILURE;
-            break;
-        }
-        if (health_check_due) {
-            health_check_due = 0;
+        /* QNX reports a timed-out dispatch context with rcvid == -1.
+         * Handle it directly so offline startup and recovery probes run on
+         * every health interval even when no client has opened /dev/quiver.
+         */
+        if (context->message_context.rcvid == -1) {
             if (!stopping) {
                 check_device_health(dispatch, &attach_id, &device, &pci,
                                     &resource_attributes, &connect_functions,
                                     &io_functions, &unavailable_reported);
             }
+            continue;
+        }
+        if (dispatch_handler(context) == -1) {
+            perror("QNX-Quiver: dispatch_handler");
+            exit_status = EXIT_FAILURE;
+            break;
         }
     }
 

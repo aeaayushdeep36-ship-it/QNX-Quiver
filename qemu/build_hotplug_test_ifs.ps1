@@ -26,6 +26,16 @@ $qnxHost = Join-Path $QnxBase 'host\win64\x86_64'
 $qnxTarget = Join-Path $QnxBase 'target\qnx'
 $dumpifs = Join-Path $qnxHost 'usr\bin\dumpifs.exe'
 $mkifs = Join-Path $qnxHost 'usr\bin\mkifs.exe'
+$qcc = Join-Path $qnxHost 'usr\bin\qcc.exe'
+$pciProbe = Join-Path $projectRoot 'build\quiver-pci-db-probe'
+if (-not (Test-Path -LiteralPath $pciProbe)) {
+    & $qcc -Vgcc_ntox86_64 -std=c11 -D_QNX_SOURCE -Wall -Wextra -Werror -O2 `
+        -I (Join-Path $projectRoot 'include') -o $pciProbe `
+        (Join-Path $projectRoot 'tests\qnx_pci_db_probe.c') -lpci
+    if ($LASTEXITCODE -ne 0) {
+        throw "Could not build the QNX PCI database probe (exit $LASTEXITCODE)"
+    }
+}
 foreach ($required in @($OriginalIfs, $dumpifs, $mkifs,
         (Join-Path $qnxTarget 'x86_64\boot\sys\procnto-smp-instr'),
         (Join-Path $projectRoot 'build\quiver-pci-rm'))) {
@@ -101,7 +111,9 @@ foreach ($relativePath in @(
         'lib/dll/pci/pci_bkwd_compat.so', 'lib/dll/pci/pci_debug2.so',
         'lib/dll/pci/pci_server-event_handler.so',
         'lib/dll/pci/pci_server-buscfg-hotplug.so',
-        'lib/dll/pci/pci_server-buscfg2-hotplug.so')) {
+        'lib/dll/pci/pci_server-buscfg2-hotplug.so',
+        'usr/lib/libncurses.so.6', 'usr/lib/libpanelw.so.6',
+        'usr/sbin/pci-tool')) {
     $sourcePath = Join-Path $targetRoot ($relativePath.Replace('/', '\'))
     if (-not (Test-Path -LiteralPath $sourcePath)) {
         throw "Required QNX SDP 8.0 input is missing: $sourcePath"
@@ -110,16 +122,24 @@ foreach ($relativePath in @(
     New-Item -ItemType Directory -Force -Path (Split-Path $destination -Parent) | Out-Null
     Copy-Item -LiteralPath $sourcePath -Destination $destination -Force
 }
+$terminfoSource = Join-Path $qnxTarget 'usr\share\terminfo\q\qansi'
+if (-not (Test-Path -LiteralPath $terminfoSource)) {
+    throw "Required QNX terminfo entry is missing: $terminfoSource"
+}
+$terminfoDestination = Join-Path $sourceRoot 'usr\share\terminfo\q\qansi'
+New-Item -ItemType Directory -Force -Path (Split-Path $terminfoDestination -Parent) | Out-Null
+Copy-Item -LiteralPath $terminfoSource -Destination $terminfoDestination -Force
 foreach ($name in @('multiboot.boot', 'startup-x86', 'procnto-smp-instr')) {
     Copy-Item -LiteralPath (Join-Path $targetRoot (Join-Path 'boot\sys' $name)) `
         -Destination (Join-Path $sourceRoot $name) -Force
 }
 Copy-Item -LiteralPath (Join-Path $targetRoot 'boot\sys\procnto-smp-instr') -Destination (Join-Path $sourceRoot 'procnto-smp-instr') -Force
 
-$testComponents = if ($BaselinePciServer) { @() } else { @('quiver-pci-rm', 'pci_hotplug_wait.sh', 'pci_hotplug_cycle.sh') }
+$testComponents = if ($BaselinePciServer) { @() } else { @('quiver-pci-rm', 'quiver-pci-db-probe', 'pci_hotplug_wait.sh', 'pci_hotplug_cycle.sh') }
 foreach ($relativePath in $testComponents) {
     $sourcePath = switch ($relativePath) {
         'quiver-pci-rm' { Join-Path $projectRoot 'build\quiver-pci-rm' }
+        'quiver-pci-db-probe' { Join-Path $projectRoot 'build\quiver-pci-db-probe' }
         default { Join-Path $projectRoot (Join-Path 'qnx' $relativePath) }
     }
     if (-not (Test-Path -LiteralPath $sourcePath)) {
@@ -173,7 +193,7 @@ if (-not $EventHandlerOnly -and -not $BaselinePciServer) {
     $moduleManifest += "`r`n$buscfgModule=lib/dll/pci/$moduleName"
 }
 if (-not $BaselinePciServer) {
-    $moduleManifest += "`r`nquiver-pci-rm`r`npci_hotplug_wait.sh`r`npci_hotplug_cycle.sh"
+    $moduleManifest += "`r`n[+raw] usr/sbin/pci-tool`r`nusr/lib/libncurses.so.6`r`nusr/lib/libpanelw.so.6`r`nterminfo/q/qansi=usr/share/terminfo/q/qansi`r`nquiver-pci-rm`r`nquiver-pci-db-probe`r`npci_hotplug_wait.sh`r`npci_hotplug_cycle.sh"
 }
 $manifest = [regex]::Replace($manifest, '(?m)^sbin/pci-server\s*$', '$0' + "`r`n$moduleManifest", 1)
 if (-not $BaselinePciServer -and $manifest -notmatch '(?m)^quiver-pci-rm\s*$') {
@@ -184,6 +204,7 @@ Set-Content -LiteralPath $manifestPath -Value $manifest -Encoding Ascii
 
 $startupPath = Join-Path $buildFiles 'startup.sh'
 $startup = Get-Content -LiteralPath $startupPath -Raw
+$startup = [regex]::Replace($startup, '(?m)^(#!.*)$', '$1' + "`r`nexport TERMINFO=/proc/boot/terminfo", 1)
 $startupPattern = '(?m)^(\s*chmod a\+rx /dev/pci/server_id_1)\s*$'
 if ($startup -notmatch $startupPattern) {
     throw 'Could not find the point after PCI-server startup in startup.sh'
