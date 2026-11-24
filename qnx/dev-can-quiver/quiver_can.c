@@ -20,6 +20,8 @@
 #define QV_CAN_QUEUE_SIZE 64u
 #define QV_CAN_POLL_NS 1000000L
 #define QV_CAN_RX_QUEUE_SIZE 64u
+#define QV_CAN_TX_RETRIES 5u
+#define QV_CAN_TX_RETRY_NS 1000000L
 
 typedef struct {
     qv_client_t client;
@@ -34,9 +36,11 @@ typedef struct {
     volatile sig_atomic_t rx_stop;
     pthread_t rx_worker;
     pthread_t signal_watcher;
-    uint64_t rx_count;
-    uint64_t tx_count;
-    uint64_t dropped_count;
+    _Atomic uint64_t rx_count;
+    _Atomic uint64_t tx_count;
+    _Atomic uint64_t dropped_count;
+    _Atomic uint32_t bus_off;
+    _Atomic uint32_t bus_state_generation;
 } quiver_can_t;
 
 static quiver_can_t g_can = {.client = {.fd = -1}};
@@ -52,6 +56,18 @@ static volatile sig_atomic_t g_signal_watch_stop;
 static int g_signal_watch_started;
 static int g_signal_hooked;
 
+static void record_drop(void)
+{
+    (void)atomic_fetch_add_explicit(&g_can.dropped_count, 1,
+                                    memory_order_relaxed);
+    int status = qv_client_counter_add(&g_can.client,
+                                       QV_COUNTER_QNX_CAN_DROPPED, 1);
+    if (status != EOK) {
+        fprintf(stderr, "QNX-Quiver CAN: cannot publish drop counter: %s\n",
+                strerror(status));
+    }
+}
+
 static int sleep_poll_interval(void)
 {
     const struct timespec interval = {.tv_sec = 0, .tv_nsec = QV_CAN_POLL_NS};
@@ -62,6 +78,21 @@ static int can_fd_length_valid(uint8_t length)
 {
     return length <= 8 || length == 12 || length == 16 || length == 20 ||
            length == 24 || length == 32 || length == 48 || length == 64;
+}
+
+static uint32_t publish_bus_state(uint32_t fault_flags)
+{
+    uint32_t bus_off = (fault_flags & QV_FAULT_CAN_BUSOFF) != 0;
+    uint32_t prior = atomic_exchange_explicit(&g_can.bus_off, bus_off,
+                                             memory_order_relaxed);
+    if (prior != bus_off) {
+        (void)atomic_fetch_add_explicit(&g_can.bus_state_generation, 1,
+                                        memory_order_relaxed);
+        fprintf(stdout, "QNX-Quiver CAN: bus state %s\n",
+                bus_off ? "bus-off" : "recovered");
+        fflush(stdout);
+    }
+    return bus_off;
 }
 
 static void slot_to_can_msg(const qv_ring_slot_t *slot, CAN_MSG *message)
@@ -126,11 +157,11 @@ static int poll_host_can(CAN_MSG *message)
         (slot.payload[5] & QV_CAN_WIRE_FLAG_FD) == 0 ||
         !can_fd_length_valid(slot.payload[4])) {
         (void)qv_client_counter_add(&g_can.client, QV_COUNTER_QNX_CAN_RX, 1);
-        ++g_can.dropped_count;
+        record_drop();
         return EPROTO;
     }
     slot_to_can_msg(&slot, message);
-    ++g_can.rx_count;
+    (void)atomic_fetch_add_explicit(&g_can.rx_count, 1, memory_order_relaxed);
     (void)qv_client_counter_add(&g_can.client, QV_COUNTER_QNX_CAN_RX, 1);
     return EOK;
 }
@@ -139,20 +170,27 @@ static void *can_rx_worker(void *unused)
 {
     (void)unused;
     while (!g_can.rx_stop) {
+        qv_client_faults_t faults;
+        int fault_status = qv_client_get_faults(&g_can.client, &faults);
+        if (fault_status == EOK) {
+            (void)publish_bus_state(faults.fault_flags);
+        }
         CAN_MSG message;
         int status = poll_host_can(&message);
         if (status == EOK) {
+            int queue_overflow = 0;
             pthread_mutex_lock(&g_rx_lock);
             if (g_rx_count == QV_CAN_RX_QUEUE_SIZE) {
                 g_rx_tail = (g_rx_tail + 1u) % QV_CAN_RX_QUEUE_SIZE;
                 --g_rx_count;
-                ++g_can.dropped_count;
+                queue_overflow = 1;
             }
             g_rx_queue[g_rx_head] = message;
             g_rx_head = (g_rx_head + 1u) % QV_CAN_RX_QUEUE_SIZE;
             ++g_rx_count;
             pthread_cond_signal(&g_rx_ready);
             pthread_mutex_unlock(&g_rx_lock);
+            if (queue_overflow) record_drop();
             continue;
         }
         if (status != EAGAIN) {
@@ -236,13 +274,21 @@ static void can_transmit(CANDEV *cdev)
         qv_ring_slot_t slot;
         int status = can_msg_to_slot(&element->cmsg, &slot);
         if (status == EOK) {
-            status = qv_client_ring_push(&g_can.client, QV_RING_CAN_TX, &slot);
+            for (unsigned attempt = 0; attempt <= QV_CAN_TX_RETRIES; ++attempt) {
+                status = qv_client_ring_push(&g_can.client, QV_RING_CAN_TX, &slot);
+                if (status != EAGAIN || attempt == QV_CAN_TX_RETRIES) break;
+                const struct timespec delay = {
+                    .tv_sec = 0, .tv_nsec = QV_CAN_TX_RETRY_NS
+                };
+                (void)nanosleep(&delay, NULL);
+            }
         }
         if (status == EOK) {
-            ++g_can.tx_count;
+            (void)atomic_fetch_add_explicit(&g_can.tx_count, 1,
+                                            memory_order_relaxed);
             (void)qv_client_counter_add(&g_can.client, QV_COUNTER_QNX_CAN_TX, 1);
         } else {
-            ++g_can.dropped_count;
+            record_drop();
             fprintf(stderr, "QNX-Quiver CAN: transmit dropped: %s\n", strerror(status));
         }
         canmsg_queue_element(g_can.tx.free_queue, element);
@@ -251,6 +297,30 @@ static void can_transmit(CANDEV *cdev)
 
 static int can_devctl(CANDEV *cdev, io_devctl_t *msg)
 {
+    if (msg->i.dcmd == QV_CAN_DCMD_GET_STATUS) {
+        qv_can_status_t *out = _IO_OUTPUT_PAYLOAD(msg);
+        if (out == NULL) {
+            errno = EFAULT;
+            return -1;
+        }
+        qv_client_faults_t faults;
+        int status = qv_client_get_faults(&g_can.client, &faults);
+        if (status != EOK) {
+            errno = status;
+            return -1;
+        }
+        uint32_t bus_off = publish_bus_state(faults.fault_flags);
+        *out = (qv_can_status_t) {
+            .api_version = QV_CLIENT_API_VERSION,
+            .fault_flags = faults.fault_flags,
+            .bus_off = bus_off,
+            .state_generation = atomic_load_explicit(
+                &g_can.bus_state_generation, memory_order_relaxed),
+            .host_generation = faults.host_generation,
+            .qnx_generation = faults.qnx_generation
+        };
+        return sizeof(*out);
+    }
     if (cdev == &g_can.tx && msg->i.dcmd == CAN_DEVCTL_TX_FRAME_RAW) {
         const CAN_MSG *input = _IO_INPUT_PAYLOAD(msg);
         qv_ring_slot_t slot;
@@ -267,7 +337,7 @@ static int can_devctl(CANDEV *cdev, io_devctl_t *msg)
             errno = status;
             return -1;
         }
-        ++g_can.tx_count;
+        (void)atomic_fetch_add_explicit(&g_can.tx_count, 1, memory_order_relaxed);
         (void)qv_client_counter_add(&g_can.client, QV_COUNTER_QNX_CAN_TX, 1);
         return EOK;
     }
@@ -449,8 +519,11 @@ int main(int argc, char **argv)
     can_resmgr_start();
     destroy_can();
     fprintf(stdout, "QNX-Quiver CAN stopped: rx=%llu tx=%llu dropped=%llu\n",
-            (unsigned long long)g_can.rx_count,
-            (unsigned long long)g_can.tx_count,
-            (unsigned long long)g_can.dropped_count);
+            (unsigned long long)atomic_load_explicit(&g_can.rx_count,
+                                                      memory_order_relaxed),
+            (unsigned long long)atomic_load_explicit(&g_can.tx_count,
+                                                      memory_order_relaxed),
+            (unsigned long long)atomic_load_explicit(&g_can.dropped_count,
+                                                      memory_order_relaxed));
     return EXIT_SUCCESS;
 }

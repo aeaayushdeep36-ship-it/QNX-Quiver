@@ -7,7 +7,8 @@
 #include "quiver_protocol.h"
 
 #define QV_CLIENT_DEVICE_PATH "/dev/quiver"
-#define QV_CLIENT_API_VERSION UINT32_C(1)
+#define QV_CLIENT_PATH_CAPACITY 256u
+#define QV_CLIENT_API_VERSION UINT32_C(3)
 
 typedef enum {
     QV_RING_CAN_RX = 0,
@@ -46,12 +47,35 @@ typedef struct {
     uint64_t qnx_can_rx;
     uint64_t dropped_frames;
     uint64_t recovery_count;
+    uint64_t qnx_can_dropped;
+    uint32_t host_generation;
+    uint32_t qnx_generation;
+    uint64_t host_actuator_accepted;
+    uint64_t host_actuator_rejected;
+    uint64_t host_imu_dropped;
+    uint64_t host_actuator_last_id;
+    uint64_t host_actuator_last_rejected_id;
+    float host_actuator_output;
+    uint64_t qnx_imu_dropped;
+    uint64_t qnx_actuator_dropped;
 } qv_client_faults_t;
+
+typedef struct {
+    uint32_t api_version;
+    uint32_t fault_flags;
+    uint32_t bus_off;
+    uint32_t state_generation;
+    uint32_t host_generation;
+    uint32_t qnx_generation;
+} qv_can_status_t;
 
 typedef enum {
     QV_COUNTER_QNX_CAN_TX = 1,
     QV_COUNTER_QNX_CAN_RX = 2,
-    QV_COUNTER_RECOVERY = 3
+    QV_COUNTER_RECOVERY = 3,
+    QV_COUNTER_QNX_CAN_DROPPED = 4,
+    QV_COUNTER_QNX_IMU_DROPPED = 5,
+    QV_COUNTER_QNX_ACTUATOR_DROPPED = 6
 } qv_client_counter_t;
 
 typedef struct {
@@ -66,8 +90,10 @@ _Static_assert(offsetof(qv_client_ring_io_t, slot) == 64u,
                "client ring payload alignment changed");
 _Static_assert(sizeof(qv_client_ring_io_t) == 192u,
                "client ring request ABI changed");
-_Static_assert(sizeof(qv_client_faults_t) == 56u,
+_Static_assert(sizeof(qv_client_faults_t) == 136u,
                "client fault snapshot ABI changed");
+_Static_assert(sizeof(qv_can_status_t) == 24u,
+               "CAN status devctl ABI changed");
 _Static_assert(sizeof(qv_client_counter_add_t) == 16u,
                "client counter request ABI changed");
 
@@ -76,12 +102,16 @@ _Static_assert(sizeof(qv_client_counter_add_t) == 16u,
 #define QV_DCMD_RING_PUSH      __DIOT(_DCMD_MISC, 0xD2, qv_client_ring_io_t)
 #define QV_DCMD_GET_FAULTS     __DIOF(_DCMD_MISC, 0xD3, qv_client_faults_t)
 #define QV_DCMD_COUNTER_ADD    __DIOT(_DCMD_MISC, 0xD4, qv_client_counter_add_t)
+#define QV_CAN_DCMD_GET_STATUS __DIOF(_DCMD_MISC, 0xD5, qv_can_status_t)
 
 typedef struct {
     int fd;
+    int open_flags;
+    char path[QV_CLIENT_PATH_CAPACITY];
 } qv_client_t;
 
 int qv_client_open(qv_client_t *client, const char *path, int open_flags);
+int qv_client_reopen(qv_client_t *client);
 void qv_client_close(qv_client_t *client);
 int qv_client_get_info(qv_client_t *client, qv_client_info_t *info);
 int qv_client_ring_pop(qv_client_t *client, qv_ring_id_t ring,

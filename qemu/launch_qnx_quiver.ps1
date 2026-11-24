@@ -2,7 +2,7 @@
 param(
     [string]$QemuPath = 'C:\Program Files\qemu\qemu-system-x86_64.exe',
     [string]$VmRoot = "$env:USERPROFILE\qnxvm",
-    [string]$SharedMemoryPath = "$env:TEMP\qnx_quiver_shm.bin",
+    [string]$SharedMemoryPath = "$env:TEMP\qnx_quiver_shm_v3.bin",
     [switch]$ProbeOnly,
     [switch]$UseTcg
 )

@@ -12,7 +12,7 @@
 #endif
 
 #define QV_PROTOCOL_MAGIC UINT32_C(0x51564231) /* QVB1 */
-#define QV_PROTOCOL_VERSION UINT16_C(1)
+#define QV_PROTOCOL_VERSION UINT16_C(3)
 #define QV_BAR2_BYTES UINT32_C(0x400000)
 #define QV_SUPERBLOCK_OFFSET UINT32_C(0x000000)
 #define QV_FAULT_BANK_OFFSET UINT32_C(0x001000)
@@ -48,6 +48,12 @@
 #define QV_CAN_WIRE_FLAG_EXTENDED UINT8_C(0x04)
 #define QV_CAN_WIRE_FLAG_FD UINT8_C(0x08)
 
+/* Actuator command payload: axis:u32, value:f32, ttl_ms:u32, reserved:u32,
+ * command_id:u64. TTL starts when the simulator accepts the command. */
+#define QV_ACTUATOR_WIRE_BYTES 24u
+#define QV_ACTUATOR_TTL_MAX_MS UINT32_C(1000)
+#define QV_ACTUATOR_VALUE_LIMIT 1.0f
+
 typedef struct QV_ALIGN64 {
     uint32_t magic;
     uint16_t protocol_version;
@@ -71,7 +77,17 @@ typedef struct QV_ALIGN64 {
     _Atomic uint64_t qnx_can_rx;
     _Atomic uint64_t dropped_frames;
     _Atomic uint64_t recovery_count;
-    uint8_t reserved[8];
+    _Atomic uint32_t host_seq;
+    _Atomic uint32_t qnx_seq;
+    _Atomic uint64_t qnx_can_dropped;
+    _Atomic uint64_t host_actuator_accepted;
+    _Atomic uint64_t host_actuator_rejected;
+    _Atomic uint64_t host_imu_dropped;
+    _Atomic uint64_t host_actuator_last_id;
+    _Atomic uint64_t host_actuator_last_rejected_id;
+    _Atomic uint32_t host_actuator_output_bits;
+    _Atomic uint64_t qnx_imu_dropped;
+    _Atomic uint64_t qnx_actuator_dropped;
 } qv_fault_bank_t;
 
 typedef struct QV_ALIGN64 {
@@ -110,7 +126,7 @@ typedef struct QV_ALIGN64 {
 } qv_bar2_t;
 
 _Static_assert(sizeof(qv_superblock_t) == 64u, "superblock must occupy one cache line");
-_Static_assert(sizeof(qv_fault_bank_t) == 64u, "fault bank header must occupy one cache line");
+_Static_assert(sizeof(qv_fault_bank_t) == 192u, "fault bank header must occupy three cache lines");
 _Static_assert(sizeof(qv_ring_control_t) == 64u, "ring control must occupy one cache line");
 _Static_assert(sizeof(qv_ring_slot_t) == QV_RING_SLOT_BYTES, "ring slot size mismatch");
 _Static_assert(sizeof(qv_ring_region_t) == QV_RING_BYTES, "ring region size mismatch");

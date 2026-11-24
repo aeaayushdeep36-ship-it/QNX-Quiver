@@ -1,51 +1,38 @@
-# QNX-Quiver PCI services
+# QNX-Quiver PCI service and client API
 
 ## Resident resource manager
 
-`pci_rm.c` owns the QEMU ivshmem PCI function for its lifetime, maps BAR2 as noncached device memory, validates the QVB1 header, and registers `/dev/quiver`. BAR2 remains private to the resource manager; clients use status reads and the versioned `devctl` API in `include/quiver_client.h`. The node is mode `0660`. SIGINT, SIGTERM, and SIGHUP detach the name, unmap BAR2, and detach from the PCI server.
+`pci_rm.c` exclusively owns the QEMU ivshmem PCI function, maps BAR2 as noncached device memory, validates QVB1 v3, and publishes `/dev/quiver`. BAR2 remains private to the manager. Its `devctl` API validates ring direction and request shape. SIGINT/SIGTERM/SIGHUP withdraw the node and release resources. Once resident, it checks PCI health once per second, withdraws the node on device or PCI-server loss, and republishes only after a fresh attach/map/protocol validation.
 
 ## Client API
 
-Build the QNX client object and read-only probe with:
+Build with `make pci-client client-probe`. Client calls return zero on success or a positive QNX error number.
 
-    make pci-client client-probe
+- `qv_client_get_info()` reports API/protocol versions, BAR size, generation, and ring geometry.
+- `qv_client_ring_pop()` reads CAN RX or IMU RX. Multiple processes work-share the single serialized ring consumer; each record goes to one client only.
+- `qv_client_ring_push()` publishes CAN TX or actuator TX. An ambiguous disconnect is returned to the caller and never replayed.
+- `qv_client_get_faults()` provides a bounded, sequence-consistent snapshot of fault flags, latency, CAN/IMU/actuator counters, command IDs, and actuator output.
+- `qv_client_counter_add()` updates only QNX-owned CAN TX/RX/drop and recovery counters.
 
-The public API is declared in `include/quiver_client.h` and implemented in `client.c`. API calls return `0` on success or a positive QNX error number. Open read-only for info, fault snapshots, and ring consumption; open read/write for ring production and QNX telemetry updates.
+Info and fault reads may reopen a disconnected descriptor, verify the API/QVB1 version, and retry the read once. Ring mutations are not retried because the manager may have completed a request just before disconnect.
 
-- `qv_client_get_info()` reports API/QVB1 versions, BAR size, generation, and ring geometry.
-- `qv_client_ring_pop()` consumes one slot from host-to-QNX CAN RX or IMU RX. It returns `EAGAIN` when empty and `EPROTO` for invalid ring metadata or a mismatched slot type.
-- `qv_client_ring_push()` publishes one CAN TX or actuator TX slot. It returns `EAGAIN` on a full ring and rejects writes to host-owned rings.
-- `qv_client_get_faults()` reads a snapshot of the fault flags, latency setting, and counters.
-- `qv_client_counter_add()` updates only QNX-owned CAN TX/RX and recovery counters. Fault flags and latency remain host-owned and cannot be changed through this client API.
+## Build and start
 
-`build/quiver-client-probe` exercises info and fault snapshot reads without consuming or publishing ring data.
+In QNX SDP 8.0 run `make pci-rm`, transfer `build/quiver-pci-rm` into the guest, and start it after `pci-server` is available:
 
-While resident, it checks the BAR assignment once per second. If a PCI API call reports that the PCI server has stopped, or BAR2 is no longer valid, it withdraws `/dev/quiver` and releases or invalidates its old mapping/handle. It keeps running and retries discovery. Once the device is available through a running PCI server again, it validates BAR2 and QVB1 before publishing `/dev/quiver` again. Start the service when the PCI server and device are present; startup without them fails with a diagnostic.
+```sh
+/tmp/quiver-pci-rm
+cat /dev/quiver
+```
 
-Build with QNX SDP 8.0 from the project root:
+It remains in the foreground. Stop it with `slay -s SIGTERM quiver-pci-rm`; the node disappears. Starting it again reacquires the device if the PCI server and function are present.
 
-    make pci-rm
+## Recovery evidence
 
-Copy `build/quiver-pci-rm` to the guest and start it with the required QNX I/O and physical-memory privileges:
+PCI-server stop/restart recovery passed in the earlier QNX guest build: `/dev/quiver` disappeared after `PCI_ERR_SERVER_NOT_AVAILABLE`, then returned after `pci-server` restarted. That runtime test predates protocol v3. The v3 sources cross-compile, but need a fresh deployment/runtime pass.
 
-    /tmp/quiver-pci-rm
+The current bridged QEMU test used the guest's default PCI-server config. QMP accepted `device_del`, but did not emit `DEVICE_DELETED` and `query-pci` still listed ivshmem. Restart the PCI server using `../pci_server_hotplug.cfg` and use `../pci_hotplug_wait.sh` before treating virtual remove/reinsert as verified. No physical link-loss test has been performed.
 
-It remains in the foreground. In a second shell, inspect it with:
+## One-shot bring-up and fault investigation
 
-    cat /dev/quiver
-
-Stop it with SIGTERM (for example `slay -s SIGTERM quiver-pci-rm`). The node disappears when the service exits. Starting it again should reacquire the PCI device and recreate the node.
-
-## Recovery behavior verified in the QNX guest
-
-With the manager attached, terminating and restarting `pci-server` was verified in the WSL QEMU guest. The manager stayed alive; `/dev/quiver` disappeared after `PCI_ERR_SERVER_NOT_AVAILABLE`, then returned after `pci-server` restarted. A read after recovery reported device `1af4:1110`, BAR2 size 4 MiB, and QVB1 v1. SIGTERM after recovery removed the node and exited cleanly.
-
-QEMU 10.2.1 accepted `device_del quiver_ivshmem` on this i440FX machine but continued to list the function in `query-pci`, so physical PCI hot-unplug/reinsert could not be exercised in this guest configuration. The test verifies PCI-server disconnect/reconnect handling. BAR2 loss caused by actual hardware removal and hot-remove notifications remain unverified. Startup with the PCI server/device absent fails; restart the manager after they are available.
-
-## One-shot bring-up check
-
-`pci_service.c` is retained as a one-shot attach/map/protocol smoke check. Build it with `make pci-service`; it validates and exits without registering a device node.
-
-## Fault investigation
-
-The earlier memory fault was reproduced when `ThreadCtl(_NTO_TCTL_IO, 0)` was omitted; the same PCI path succeeds when I/O privilege is acquired first. The earlier probe also tried to read BAR0 config offset `0x10` with `pci_device_cfg_rd32()`, which is outside that API's documented device-specific config range (starting at `0x40`). Use the owner-only `pci_device_read_ba()` API to retrieve BARs. See `docs/pci-service-investigation.md` for details.
+`pci_service.c` remains a one-shot attach/map/protocol smoke check (`make pci-service`). The earlier memory fault was reproduced when `ThreadCtl(_NTO_TCTL_IO, 0)` was omitted; the same PCI path succeeds after acquiring I/O privilege. An earlier probe also used `pci_device_cfg_rd32()` for BAR0 offset `0x10`, outside its documented device-specific config range. `pci_device_read_ba()` is used to retrieve BARs. Details are in `docs/pci-service-investigation.md`.

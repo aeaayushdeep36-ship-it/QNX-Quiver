@@ -1,8 +1,12 @@
 # QNX-Quiver least-privilege policy fragment for a target integration.
-# Start the three QNX-Quiver processes with `on -T` using these types.
+# Start each service with its declared type (for example, `on -T quiver_can_t`).
 type quiver_pci_t;
 type quiver_can_t;
 type quiver_can_client_t;
+type quiver_imu_t;
+type quiver_actuator_t;
+type quiver_trace_t;
+type quiver_controller_t;
 
 # PCI resource manager: claim/map the device through pci-server and publish
 # only the client API node. PCI-server channel-connect permission is BSP/image
@@ -21,3 +25,10 @@ allow quiver_can_t quiver_pci_t : channel connect;
 # CAN clients can open the two CAN nodes and read only the restricted PCI API.
 allow quiver_can_client_t quiver_can_t : channel connect;
 allow quiver_can_client_t quiver_pci_t : channel connect;
+
+# Peripheral tools use the same narrow devctl endpoint. The API itself rejects
+# writes to host-owned controls and ring operations outside each service's role.
+allow quiver_imu_t quiver_pci_t : channel connect;
+allow quiver_actuator_t quiver_pci_t : channel connect;
+allow quiver_trace_t quiver_pci_t : channel connect;
+allow quiver_controller_t quiver_pci_t : channel connect;

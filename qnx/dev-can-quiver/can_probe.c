@@ -64,6 +64,27 @@ int main(int argc, char **argv)
     if (argc == 2 && strcmp(argv[1], "--drain-rx") == 0) {
         return drain_rx_probe();
     }
+    if (argc == 2 && strcmp(argv[1], "--status") == 0) {
+        qv_can_status_t can_status;
+        int fd = open("/dev/can0/rx0", O_RDONLY);
+        if (fd == -1) {
+            fprintf(stderr, "QNX-Quiver CAN probe: open RX node: %s\n",
+                    strerror(errno));
+            return 1;
+        }
+        int status = devctl(fd, QV_CAN_DCMD_GET_STATUS, &can_status,
+                            sizeof(can_status), NULL);
+        close(fd);
+        if (status != EOK || can_status.api_version != QV_CLIENT_API_VERSION) {
+            fprintf(stderr, "QNX-Quiver CAN probe: status query failed: %s\n",
+                    strerror(status != EOK ? status : EPROTO));
+            return 1;
+        }
+        printf("CAN status: %s fault_flags=0x%08x generation=%u\n",
+               can_status.bus_off ? "bus-off" : "active",
+               can_status.fault_flags, can_status.state_generation);
+        return 0;
+    }
     qv_client_t client = {.fd = -1};
     qv_client_faults_t before, after;
     CAN_MSG tx, rx;

@@ -1,62 +1,62 @@
 # QNX-Quiver
 
-QNX-Quiver is a QNX SDP 8.0 virtual embedded hardware and driver project. Its intended target is QEMU x86_64, with a host plant simulator exchanging CAN, IMU, and actuator data through a shared-memory protocol.
+QNX-Quiver is a QNX SDP 8.0 x86_64 virtual embedded platform. A host plant simulator exchanges CAN, IMU, and actuator records with QNX services through an ivshmem BAR2 protocol. QNX clients access shared records through `/dev/quiver`; the PCI manager retains sole ownership of the PCI function and mapping.
 
-## Current implementation status
+## Current implementation
 
-The machine has QNX SDP 8.0 and the x86_64 CAN DDK. Windows QEMU 11.1.0 lacks ivshmem; Ubuntu WSL QEMU 10.2.1 provides it. The QNX guest has booted with `ivshmem-plain`, and live BAR2 visibility from a WSL host simulator has been verified. The QNX PCI resource manager exposes `/dev/quiver` and its restricted client `devctl` API. The libcan CAN-FD frontend publishes `/dev/can0/rx0` and `/dev/can0/tx0`; a 64-byte extended-ID frame has passed a guest-to-simulator-to-guest loopback check.
+The project includes protocol v3, a resident PCI resource manager with PCI-server restart recovery, a QNX client API, split libcan CAN-FD RX/TX endpoints, IMU and actuator utilities, fault tracing, a controller demonstration, a development supervisor, and a WSL QEMU launcher. Exact build and evidence status is in [docs/implementation-status.md](docs/implementation-status.md).
 
-The implemented foundation includes the shared-memory protocol, host simulator, QNX cross-compiled layout check, WSL QEMU launcher, verified guest BAR2 access, and resident PCI resource manager. Use WSL for both QEMU and the host simulator when testing live shared memory; Windows and WSL mappings of the same DrvFS file did not reflect live writes across the boundary.
+## Build and host checks
 
-See docs/environment.md for the discovered environment and docs/protocol.md for the BAR2 layout and protocol constraints.
+From the QNX SDP 8.0 environment, run:
 
-## Build and run
+```sh
+make clean all
+```
 
-Build the protocol layout check from a QNX SDP 8.0 environment:
+The build uses `-Wall -Wextra -Werror` and creates the QNX binaries in `build/`. Run host protocol tests on Windows or Linux with Python 3.10+:
 
-    qcc -Vgcc_ntox86_64 -std=c11 -Wall -Wextra -Werror -Iinclude -o build/protocol-check qnx/protocol_check.c
-    build/protocol-check
+```sh
+python -m unittest discover -s tests -v
+python host/sim_engine/quiver_sim.py --self-test
+```
 
-Build the minimal PCI service from the project root in the same environment:
+The simulator reports measured rate, wake-lateness percentiles, and missed deadlines during bounded runs. For injected latency characterization, pass `--duration 2 --latency-spike-us 500`. Python/Windows/WSL timing is observational and is not a hard real-time guarantee.
 
-    make pci-service
+## QEMU and shared memory
 
-Build the resident PCI resource manager:
+The Windows QEMU 11.1.0 installation lacks `ivshmem-plain`; the supported live path is Ubuntu WSL QEMU 10.2.1. Run both QEMU and the simulator inside WSL against the same v3 backing file:
 
-    make pci-rm
+```sh
+bash qemu/launch_qnx_quiver_wsl.sh
+bash qemu/run_quiver_sim_wsl.sh
+```
 
-Build the libcan CAN-FD endpoints, integration probe, and security-policy fragment check:
+For a software PCI lifecycle test, launch the guest with `QNX_PCI_TOPOLOGY=pci-bridge-hotplug`. Load both QNX PCI event-handler and hotplug bus-configuration modules using [qnx/pci_server_hotplug.cfg](qnx/pci_server_hotplug.cfg), then follow the remove/reinsert steps in [qnx/README.md](qnx/README.md). A successful QMP `device_del` reply is not enough: the test requires `DEVICE_DELETED`, inventory change, `/dev/quiver` withdrawal, and reacquisition. The currently supplied default PCI-server config did not acknowledge removal; this end-to-end test remains open.
 
-    make can-ddk can-probe policy-check
+## QNX guest flow
 
-With the PCI resource manager running and the host simulator mapped to the same BAR2 backing file, run these two commands in the QNX guest:
+After `pci-server` is running, start `build/quiver-pci-rm`. Start CAN RX and TX separately because the supplied guest rejects a second libcan path attach from one process:
 
-    build/dev-can-quiver rx &
-    build/dev-can-quiver tx &
-    build/quiver-can-probe
+```sh
+build/dev-can-quiver rx &
+build/dev-can-quiver tx &
+build/quiver-can-probe
+build/quiver-can-probe --status
+```
 
-The endpoint processes are separate because this QNX SDP 8.0 target image rejects a second libcan node attach from the same process. The frontend accepts CAN-FD payload lengths 0–8, 12, 16, 20, 24, 32, 48, and 64 bytes. The policy fragment is not a complete boot policy; merge it with the target baseline and add the PCI-server channel permission for that image.
+Run one IMU-ring consumer at a time: `build/quiver-imu` or `build/quiver-controller`. `build/quiver-actuator value [ttl-ms]` sends a bounded command and waits for its command-ID acknowledgement. `build/quiver-trace [path.csv]` records fault and telemetry snapshots. `build/quiver-supervisor` coordinates development startup and restart; product use still requires distinct process types and a verified boot policy.
 
-Run the host simulator on Windows with Python 3.10 or newer:
-
-    python host/sim_engine/quiver_sim.py --shm "%TEMP%\qnx_quiver_shm.bin"
-
-The simulator creates and initializes a 4 MiB shared file when it does not exist. While it is running, enter fault busoff, fault crc, fault imu_stuck, latency 5000, clear, or status to update or inspect the shared fault bank. Use quit to stop the simulator. Use --self-test to check protocol initialization and ring operations without launching the physics loop. Add --duration 2 to run a short, measured smoke session.
-
-For the WSL QEMU guest, run the simulator inside WSL against the same backing file:
-
-    bash qemu/run_quiver_sim_wsl.sh
-
-This keeps both mappings in the WSL environment. A bounded run can be passed through with `--duration 2`. The simulator exercises the host-side protocol; it is not a QNX driver and does not implement PCI attachment or device nodes.
+The security policy in `qnx/security/qnx_quiver.policy` is only a compile-checked fragment. The current guest has no active `/proc/boot/secpol.bin`, and the PCI-server channel type is image-specific; read the policy section in the QNX guide before product integration.
 
 ## Project layout
 
-- include/quiver_protocol.h: BAR2 data structures, offsets, atomics, and compile-time layout assertions.
-- host/sim_engine/: shared-memory plant simulator and fault-injection console.
-- qnx/: QNX target sources and tools; includes protocol checker and minimal PCI service.
-- qemu/: target launch and capability checks.
-- tests/: host protocol checks.
+- `include/`: protocol v3 and client API v3 definitions.
+- `host/sim_engine/`: plant simulator, shared-memory protocol, fault controls, and timing metrics.
+- `qnx/dev-quiver/`: PCI service, resident resource manager, and client library.
+- `qnx/dev-can-quiver/`: QNX CAN DDK frontend and probes.
+- `qnx/services/`: IMU consumer, actuator client, trace utility, and controller demo.
+- `qnx/supervisor/`: development process supervisor.
+- `qemu/`, `tests/`, and `codelab/`: launchers, host/QMP tests, and clean-environment handoff.
 
-## Naming
-
-The project name is QNX-Quiver. Protocol magic QVB1, PCI vendor/device IDs, and established device paths are wire or platform identifiers from the handoff and are retained as technical identifiers.
+Protocol format and ownership rules are in [docs/protocol.md](docs/protocol.md). The project name is QNX-Quiver; QVB1 and device IDs are technical protocol/platform identifiers.

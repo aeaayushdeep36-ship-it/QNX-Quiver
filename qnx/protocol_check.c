@@ -12,6 +12,11 @@ int main(void)
         fputs("64-bit atomics are not always lock-free on this target\n", stderr);
         return 1;
     }
+    if (offsetof(qv_fault_bank_t, host_actuator_last_id) != 96u ||
+        sizeof(qv_fault_bank_t) != 192u) {
+        fputs("fault-bank v3 layout mismatch\n", stderr);
+        return 1;
+    }
     printf("QNX-Quiver BAR2 protocol v%u: %u bytes, %u slots/ring (%u usable)\n",
            (unsigned)QV_PROTOCOL_VERSION, (unsigned)sizeof(qv_bar2_t),
            (unsigned)QV_RING_SLOTS, (unsigned)QV_RING_CAPACITY);

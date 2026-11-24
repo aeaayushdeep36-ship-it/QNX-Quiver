@@ -47,6 +47,18 @@ int main(void)
            faults.fault_flags, faults.latency_spike_us,
            faults.host_can_tx, faults.host_can_rx, faults.qnx_can_tx,
            faults.qnx_can_rx, faults.dropped_frames, faults.recovery_count);
+    printf("qnx_can_dropped=%" PRIu64 " qnx_imu_dropped=%" PRIu64
+           " qnx_actuator_dropped=%" PRIu64 " host_imu_dropped=%" PRIu64
+           " actuator_ack=%" PRIu64 " actuator_rejected=%" PRIu64
+           " last_ack=%" PRIu64 " last_rejected=%" PRIu64
+           " output=%.4f snapshot=%" PRIu32 "/%" PRIu32 "\n",
+           faults.qnx_can_dropped, faults.qnx_imu_dropped,
+           faults.qnx_actuator_dropped, faults.host_imu_dropped,
+           faults.host_actuator_accepted, faults.host_actuator_rejected,
+           faults.host_actuator_last_id,
+           faults.host_actuator_last_rejected_id,
+           faults.host_actuator_output, faults.host_generation,
+           faults.qnx_generation);
     qv_client_close(&client);
     return 0;
 }

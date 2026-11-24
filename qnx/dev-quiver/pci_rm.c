@@ -1,6 +1,7 @@
 #include <errno.h>
 #include <inttypes.h>
 #include <signal.h>
+#include <sched.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -282,6 +283,87 @@ static int ring_push(qv_ring_region_t *ring, const qv_ring_slot_t *slot)
     return EOK;
 }
 
+static void fault_write_begin(qv_fault_bank_t *faults)
+{
+    uint32_t sequence = atomic_load_explicit(&faults->qnx_seq,
+                                              memory_order_relaxed);
+    if ((sequence & 1u) != 0u) ++sequence; /* Recover a prior manager exit. */
+    atomic_store_explicit(&faults->qnx_seq, sequence + 1u,
+                          memory_order_release);
+}
+
+static void fault_write_end(qv_fault_bank_t *faults)
+{
+    uint32_t sequence = atomic_load_explicit(&faults->qnx_seq,
+                                              memory_order_relaxed);
+    atomic_store_explicit(&faults->qnx_seq, sequence + 1u,
+                          memory_order_release);
+}
+
+static int fault_snapshot(qv_fault_bank_t *faults,
+                          qv_client_faults_t *result_out)
+{
+    uint32_t host_before, qnx_before, host_after, qnx_after;
+    for (unsigned attempt = 0; attempt < 10000u; ++attempt) {
+        host_before = atomic_load_explicit(&faults->host_seq,
+                                           memory_order_acquire);
+        qnx_before = atomic_load_explicit(&faults->qnx_seq,
+                                          memory_order_acquire);
+        if (((host_before | qnx_before) & 1u) != 0u) {
+            (void)sched_yield();
+            continue;
+        }
+        result_out->fault_flags = atomic_load_explicit(&faults->fault_flags,
+                                                   memory_order_relaxed);
+        result_out->latency_spike_us = atomic_load_explicit(&faults->latency_spike_us,
+                                                        memory_order_relaxed);
+        result_out->host_can_tx = atomic_load_explicit(&faults->host_can_tx,
+                                                   memory_order_relaxed);
+        result_out->host_can_rx = atomic_load_explicit(&faults->host_can_rx,
+                                                   memory_order_relaxed);
+        result_out->qnx_can_tx = atomic_load_explicit(&faults->qnx_can_tx,
+                                                  memory_order_relaxed);
+        result_out->qnx_can_rx = atomic_load_explicit(&faults->qnx_can_rx,
+                                                  memory_order_relaxed);
+        result_out->dropped_frames = atomic_load_explicit(&faults->dropped_frames,
+                                                      memory_order_relaxed);
+        result_out->recovery_count = atomic_load_explicit(&faults->recovery_count,
+                                                      memory_order_relaxed);
+        result_out->qnx_can_dropped = atomic_load_explicit(&faults->qnx_can_dropped,
+                                                       memory_order_relaxed);
+        result_out->host_actuator_accepted = atomic_load_explicit(
+            &faults->host_actuator_accepted, memory_order_relaxed);
+        result_out->host_actuator_rejected = atomic_load_explicit(
+            &faults->host_actuator_rejected, memory_order_relaxed);
+        result_out->host_imu_dropped = atomic_load_explicit(
+            &faults->host_imu_dropped, memory_order_relaxed);
+        result_out->host_actuator_last_id = atomic_load_explicit(
+            &faults->host_actuator_last_id, memory_order_relaxed);
+        result_out->host_actuator_last_rejected_id = atomic_load_explicit(
+            &faults->host_actuator_last_rejected_id, memory_order_relaxed);
+        uint32_t actuator_output_bits = atomic_load_explicit(
+            &faults->host_actuator_output_bits, memory_order_relaxed);
+        memcpy(&result_out->host_actuator_output, &actuator_output_bits,
+               sizeof(result_out->host_actuator_output));
+        result_out->qnx_imu_dropped = atomic_load_explicit(
+            &faults->qnx_imu_dropped, memory_order_relaxed);
+        result_out->qnx_actuator_dropped = atomic_load_explicit(
+            &faults->qnx_actuator_dropped, memory_order_relaxed);
+        host_after = atomic_load_explicit(&faults->host_seq,
+                                          memory_order_acquire);
+        qnx_after = atomic_load_explicit(&faults->qnx_seq,
+                                         memory_order_acquire);
+        if (host_before == host_after && qnx_before == qnx_after &&
+            ((host_after | qnx_after) & 1u) == 0u) {
+            result_out->host_generation = host_after;
+            result_out->qnx_generation = qnx_after;
+            return EOK;
+        }
+        if ((attempt & 0xffu) == 0u) (void)sched_yield();
+    }
+    return EAGAIN;
+}
+
 static int quiver_devctl(resmgr_context_t *ctp, io_devctl_t *msg,
                          iofunc_ocb_t *ocb)
 {
@@ -305,7 +387,7 @@ static int quiver_devctl(resmgr_context_t *ctp, io_devctl_t *msg,
 
     switch (msg->i.dcmd) {
     case QV_DCMD_GET_INFO: {
-        if ((ocb->ioflag & _IO_FLAG_RD) == 0) return EACCES;
+        if ((ocb->ioflag & (_IO_FLAG_RD | _IO_FLAG_WR)) == 0) return EACCES;
         if (output_capacity < sizeof(*reply) + sizeof(qv_client_info_t)) {
             return EINVAL;
         }
@@ -367,17 +449,9 @@ static int quiver_devctl(resmgr_context_t *ctp, io_devctl_t *msg,
         if (output_capacity < sizeof(*reply) + sizeof(qv_client_faults_t)) {
             return EINVAL;
         }
-        qv_fault_bank_t *faults = &device->bar2->faults;
-        qv_client_faults_t result = {
-            .fault_flags = atomic_load_explicit(&faults->fault_flags, memory_order_acquire),
-            .latency_spike_us = atomic_load_explicit(&faults->latency_spike_us, memory_order_acquire),
-            .host_can_tx = atomic_load_explicit(&faults->host_can_tx, memory_order_acquire),
-            .host_can_rx = atomic_load_explicit(&faults->host_can_rx, memory_order_acquire),
-            .qnx_can_tx = atomic_load_explicit(&faults->qnx_can_tx, memory_order_acquire),
-            .qnx_can_rx = atomic_load_explicit(&faults->qnx_can_rx, memory_order_acquire),
-            .dropped_frames = atomic_load_explicit(&faults->dropped_frames, memory_order_acquire),
-            .recovery_count = atomic_load_explicit(&faults->recovery_count, memory_order_acquire)
-        };
+        qv_client_faults_t result = {0};
+        status = fault_snapshot(&device->bar2->faults, &result);
+        if (status != EOK) return status;
         memcpy(output, &result, sizeof(result));
         output_bytes = sizeof(result);
         break;
@@ -393,9 +467,14 @@ static int quiver_devctl(resmgr_context_t *ctp, io_devctl_t *msg,
         case QV_COUNTER_QNX_CAN_TX: counter = &device->bar2->faults.qnx_can_tx; break;
         case QV_COUNTER_QNX_CAN_RX: counter = &device->bar2->faults.qnx_can_rx; break;
         case QV_COUNTER_RECOVERY: counter = &device->bar2->faults.recovery_count; break;
+        case QV_COUNTER_QNX_CAN_DROPPED: counter = &device->bar2->faults.qnx_can_dropped; break;
+        case QV_COUNTER_QNX_IMU_DROPPED: counter = &device->bar2->faults.qnx_imu_dropped; break;
+        case QV_COUNTER_QNX_ACTUATOR_DROPPED: counter = &device->bar2->faults.qnx_actuator_dropped; break;
         default: return EINVAL;
         }
+        fault_write_begin(&device->bar2->faults);
         (void)atomic_fetch_add_explicit(counter, request.amount, memory_order_relaxed);
+        fault_write_end(&device->bar2->faults);
         break;
     }
     default:
