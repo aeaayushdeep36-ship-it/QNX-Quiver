@@ -14,14 +14,22 @@ esac
 case "$timeout" in *[!0-9]*|'') echo "timeout must be an integer" >&2; exit 2 ;; esac
 
 elapsed=0
+seen_initial_state=0
 while [ "$elapsed" -le "$timeout" ]; do
-    if [ "$expected" = present ] && [ -e /dev/quiver ]; then
-        echo "PASS: /dev/quiver returned after PCI device reinsertion"
-        exit 0
-    fi
-    if [ "$expected" = absent ] && [ ! -e /dev/quiver ]; then
-        echo "PASS: /dev/quiver was withdrawn after PCI device removal"
-        exit 0
+    if [ "$expected" = present ]; then
+        if [ ! -e /dev/quiver ]; then
+            seen_initial_state=1
+        elif [ "$seen_initial_state" -eq 1 ]; then
+            echo "PASS: /dev/quiver returned after PCI device reinsertion"
+            exit 0
+        fi
+    else
+        if [ -e /dev/quiver ]; then
+            seen_initial_state=1
+        elif [ "$seen_initial_state" -eq 1 ]; then
+            echo "PASS: /dev/quiver was withdrawn after PCI device removal"
+            exit 0
+        fi
     fi
     sleep 1
     elapsed=$((elapsed + 1))

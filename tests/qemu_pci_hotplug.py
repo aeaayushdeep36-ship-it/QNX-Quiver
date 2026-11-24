@@ -94,10 +94,23 @@ def main():
     parser.add_argument("--port", type=int, default=4443)
     parser.add_argument("--device", default="quiver_ivshmem")
     parser.add_argument("--bridge", default="quiver_bridge")
+    parser.add_argument("--bus", help="QEMU bus for reinsertion (defaults to --bridge)")
+    parser.add_argument("--address",
+                        help="optional PCI address for reinsertion on --bus")
+    parser.add_argument("--memdev", default="qnx_shm",
+                        help="memory backend id passed to ivshmem-plain")
+    parser.add_argument("--acpi-eject-ack", action="store_true",
+                        help="write the i440fx ACPI eject acknowledgment via HMP")
+    parser.add_argument("--acpi-eject-port", type=lambda value: int(value, 0),
+                        default=0xAE08, help="ACPI PCI eject register I/O port")
+    parser.add_argument("--acpi-eject-mask", type=lambda value: int(value, 0),
+                        default=0x10,
+                        help="32-bit eject bit mask for the device slot")
     parser.add_argument("--timeout", type=float, default=15.0)
     parser.add_argument("--hold-removed-seconds", type=float, default=3.0,
                         help="wait for QNX clients to withdraw before reinsertion")
     args = parser.parse_args()
+    insert_bus = args.bus or args.bridge
     qmp = QMP(args.host, args.port, args.timeout)
     removed_successfully = False
     try:
@@ -105,6 +118,11 @@ def main():
         if inventory_find_device(before, args.device) is None:
             raise RuntimeError(f"{args.device} is absent before test")
         qmp.command("device_del", {"id": args.device})
+        if args.acpi_eject_ack:
+            # This is a host-injected guest ACPI acknowledgment, not evidence
+            # that QNX's PCI event handler processed the eject notification.
+            qmp.command("human-monitor-command", {"command-line":
+                f"o /w 0x{args.acpi_eject_port:x} 0x{args.acpi_eject_mask:x}"})
         if not qmp.wait_event("DEVICE_DELETED", args.device, args.timeout):
             after = qmp.command("query-pci")
             if inventory_find_device(after, args.device) is not None:
@@ -118,21 +136,34 @@ def main():
         removed_successfully = True
         if args.hold_removed_seconds > 0:
             time.sleep(args.hold_removed_seconds)
-        qmp.command("device_add", {
+        add_arguments = {
             "driver": "ivshmem-plain",
-            "memdev": "qnx_shm",
-            "bus": args.bridge,
+            "memdev": args.memdev,
+            "bus": insert_bus,
             "id": args.device,
-        })
+        }
+        if args.address is not None:
+            add_arguments["addr"] = args.address
+        qmp.command("device_add", add_arguments)
         added = qmp.command("query-pci")
         device = inventory_find_device(added, args.device)
         if device is None:
             raise RuntimeError("device_add returned but query-pci does not show ivshmem")
-        if (device.get("bus") != 1 or
-                not any(region.get("bar") == 2 and region.get("size") == 0x400000
-                        for region in device.get("regions", []))):
-            raise RuntimeError("reinserted ivshmem has unexpected bus or BAR2 geometry")
-        print("PASS: QEMU ivshmem removed and reinserted behind the PCI bridge.")
+        regions = {region.get("bar"): region for region in device.get("regions", [])}
+        bar0 = regions.get(0, {})
+        bar2 = regions.get(2, {})
+        if bar0.get("size") != 0x100 or bar2.get("size") != 0x400000:
+            raise RuntimeError("reinserted ivshmem has unexpected BAR geometry")
+        if bar0.get("address", -1) < 0 or bar2.get("address", -1) < 0:
+            print("UNVERIFIED: QEMU reinserted ivshmem, but BAR0/BAR2 remain unassigned; "
+                  "the guest PCI server did not restore its resources.", file=sys.stderr)
+            return 2
+        if args.acpi_eject_ack:
+            print("PASS: QEMU removed and reinserted ivshmem with assigned BARs after "
+                  "a host-injected ACPI eject acknowledgment.")
+            print("This does not verify that QNX handled the eject notification.")
+        else:
+            print(f"PASS: QEMU ivshmem removed and reinserted on {insert_bus}.")
         print("Guest-side proof still requires /dev/quiver withdrawal and reacquisition checks.")
         return 0
     finally:
@@ -140,12 +171,15 @@ def main():
             try:
                 current = qmp.command("query-pci")
                 if inventory_find_device(current, args.device) is None:
-                    qmp.command("device_add", {
+                    add_arguments = {
                         "driver": "ivshmem-plain",
-                        "memdev": "qnx_shm",
-                        "bus": args.bridge,
+                        "memdev": args.memdev,
+                        "bus": insert_bus,
                         "id": args.device,
-                    })
+                    }
+                    if args.address is not None:
+                        add_arguments["addr"] = args.address
+                    qmp.command("device_add", add_arguments)
                     print("CLEANUP: attempted to restore ivshmem after an incomplete test.",
                           file=sys.stderr)
             except Exception as error:

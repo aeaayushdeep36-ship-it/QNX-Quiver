@@ -3,10 +3,21 @@ param(
     [string]$QnxBase = 'C:\Users\Lenovo\qnx800',
     [string]$OriginalIfs = 'C:\Users\Lenovo\qnxvm\output\ifs.bin',
     [string]$OutputIfs,
+    [switch]$EventHandlerOnly,
+    [switch]$BaselinePciServer,
+    [switch]$Buscfg2,
     [switch]$KeepWork
 )
 
 $ErrorActionPreference = 'Stop'
+$buscfgModule = if ($Buscfg2) {
+    '/lib/dll/pci/pci_server-buscfg2-hotplug.so'
+} else {
+    '/lib/dll/pci/pci_server-buscfg-hotplug.so'
+}
+if ($Buscfg2 -and ($EventHandlerOnly -or $BaselinePciServer)) {
+    throw '-Buscfg2 requires the full hotplug test profile'
+}
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 if (-not $OutputIfs) {
     $OutputIfs = Join-Path $projectRoot 'build\ifs-hotplug-test.bin'
@@ -89,7 +100,8 @@ foreach ($relativePath in @(
         'lib/dll/pci/pci_cap-0x11.so', 'lib/dll/pci/pci_strings.so',
         'lib/dll/pci/pci_bkwd_compat.so', 'lib/dll/pci/pci_debug2.so',
         'lib/dll/pci/pci_server-event_handler.so',
-        'lib/dll/pci/pci_server-buscfg-hotplug.so')) {
+        'lib/dll/pci/pci_server-buscfg-hotplug.so',
+        'lib/dll/pci/pci_server-buscfg2-hotplug.so')) {
     $sourcePath = Join-Path $targetRoot ($relativePath.Replace('/', '\'))
     if (-not (Test-Path -LiteralPath $sourcePath)) {
         throw "Required QNX SDP 8.0 input is missing: $sourcePath"
@@ -104,7 +116,8 @@ foreach ($name in @('multiboot.boot', 'startup-x86', 'procnto-smp-instr')) {
 }
 Copy-Item -LiteralPath (Join-Path $targetRoot 'boot\sys\procnto-smp-instr') -Destination (Join-Path $sourceRoot 'procnto-smp-instr') -Force
 
-foreach ($relativePath in @('quiver-pci-rm', 'pci_hotplug_wait.sh', 'pci_hotplug_cycle.sh')) {
+$testComponents = if ($BaselinePciServer) { @() } else { @('quiver-pci-rm', 'pci_hotplug_wait.sh', 'pci_hotplug_cycle.sh') }
+foreach ($relativePath in $testComponents) {
     $sourcePath = switch ($relativePath) {
         'quiver-pci-rm' { Join-Path $projectRoot 'build\quiver-pci-rm' }
         default { Join-Path $projectRoot (Join-Path 'qnx' $relativePath) }
@@ -113,6 +126,12 @@ foreach ($relativePath in @('quiver-pci-rm', 'pci_hotplug_wait.sh', 'pci_hotplug
         throw "Required QNX-Quiver test component is missing: $sourcePath"
     }
     Copy-Item -LiteralPath $sourcePath -Destination (Join-Path $sourceRoot $relativePath) -Force
+    if ($relativePath.EndsWith('.sh')) {
+        $scriptPath = Join-Path $sourceRoot $relativePath
+        $scriptText = [System.IO.File]::ReadAllText($scriptPath)
+        $scriptText = $scriptText.Replace("`r`n", "`n").Replace("`r", "`n")
+        [System.IO.File]::WriteAllText($scriptPath, $scriptText, [System.Text.Encoding]::ASCII)
+    }
 }
 
 # Put the original image's scripts and metadata where its buildfile expects them.
@@ -135,15 +154,29 @@ Copy-Item -LiteralPath (Join-Path $imageRoot 'qtd_public_key.pem') -Destination 
 $manifestPath = Join-Path $buildFiles 'ifs.build'
 $manifest = Get-Content -LiteralPath $manifestPath -Raw
 $manifest = [regex]::Replace($manifest, '(?m)^(lib/dll/pci/pci_cap-0x01\.so)\r?$', '$1' + "`r`nlib/dll/pci/pci_cap-0x04.so", 1)
-$hotplugConfig = "[runtime]`r`nPCI_SERVER_MODULE_LIST=/lib/dll/pci/pci_server-event_handler.so`r`n`r`n[buscfg]`r`nDO_BUS_CONFIG=yes`r`nPCI_SERVER_BUSCFG_MODULE=/lib/dll/pci/pci_server-buscfg-hotplug.so"
+$hotplugConfig = if ($BaselinePciServer) {
+    "[buscfg]`r`nDO_BUS_CONFIG=no"
+} elseif ($EventHandlerOnly) {
+    "[runtime]`r`nPCI_SERVER_MODULE_LIST=/lib/dll/pci/pci_server-event_handler.so`r`n`r`n[buscfg]`r`nDO_BUS_CONFIG=no"
+} else {
+    "[runtime]`r`nPCI_SERVER_MODULE_LIST=/lib/dll/pci/pci_server-event_handler.so`r`n`r`n[buscfg]`r`nDO_BUS_CONFIG=yes`r`nPCI_SERVER_BUSCFG_MODULE=$buscfgModule"
+}
 $manifest = [regex]::Replace($manifest, '\[buscfg\]\s*DO_BUS_CONFIG=no', $hotplugConfig, 1)
-if ($manifest -notmatch 'PCI_SERVER_MODULE_LIST=/lib/dll/pci/pci_server-event_handler\.so' -or
-    $manifest -notmatch 'PCI_SERVER_BUSCFG_MODULE=/lib/dll/pci/pci_server-buscfg-hotplug\.so') {
+if ((-not $BaselinePciServer -and $manifest -notmatch 'PCI_SERVER_MODULE_LIST=/lib/dll/pci/pci_server-event_handler\.so') -or
+    (-not $EventHandlerOnly -and -not $BaselinePciServer -and
+     $manifest -notmatch ('PCI_SERVER_BUSCFG_MODULE=' + [regex]::Escape($buscfgModule)))) {
     throw 'Could not enable the PCI hotplug modules in the test IFS config'
 }
-$manifest = [regex]::Replace($manifest, '(?m)^sbin/pci-server\s*$',
-    '$0' + "`r`n/lib/dll/pci/pci_server-event_handler.so=lib/dll/pci/pci_server-event_handler.so`r`n/lib/dll/pci/pci_server-buscfg-hotplug.so=lib/dll/pci/pci_server-buscfg-hotplug.so`r`nquiver-pci-rm`r`npci_hotplug_wait.sh`r`npci_hotplug_cycle.sh", 1)
-if ($manifest -notmatch '(?m)^quiver-pci-rm\s*$') {
+$moduleManifest = if ($BaselinePciServer) { '' } else { '/lib/dll/pci/pci_server-event_handler.so=lib/dll/pci/pci_server-event_handler.so' }
+if (-not $EventHandlerOnly -and -not $BaselinePciServer) {
+    $moduleName = Split-Path $buscfgModule -Leaf
+    $moduleManifest += "`r`n$buscfgModule=lib/dll/pci/$moduleName"
+}
+if (-not $BaselinePciServer) {
+    $moduleManifest += "`r`nquiver-pci-rm`r`npci_hotplug_wait.sh`r`npci_hotplug_cycle.sh"
+}
+$manifest = [regex]::Replace($manifest, '(?m)^sbin/pci-server\s*$', '$0' + "`r`n$moduleManifest", 1)
+if (-not $BaselinePciServer -and $manifest -notmatch '(?m)^quiver-pci-rm\s*$') {
     throw 'Could not add the PCI resource manager to the test IFS'
 }
 Set-ItemProperty -LiteralPath $manifestPath -Name IsReadOnly -Value $false
@@ -155,8 +188,10 @@ $startupPattern = '(?m)^(\s*chmod a\+rx /dev/pci/server_id_1)\s*$'
 if ($startup -notmatch $startupPattern) {
     throw 'Could not find the point after PCI-server startup in startup.sh'
 }
-$startup = [regex]::Replace($startup, $startupPattern,
-    '$1' + "`r`n`r`necho `"---> Starting QNX-Quiver PCI resource manager`"`r`n /proc/boot/quiver-pci-rm &`r`n /proc/boot/pci_hotplug_cycle.sh 60 &", 1)
+if (-not $BaselinePciServer) {
+    $startup = [regex]::Replace($startup, $startupPattern,
+        '$1' + "`r`n`r`necho `"---> Starting QNX-Quiver PCI resource manager`"`r`n /proc/boot/quiver-pci-rm &", 1)
+}
 Set-ItemProperty -LiteralPath $startupPath -Name IsReadOnly -Value $false
 $startup = $startup.Replace("`r`n", "`n").Replace("`r", "`n")
 [System.IO.File]::WriteAllText($startupPath, $startup, [System.Text.Encoding]::ASCII)
@@ -182,15 +217,24 @@ $configPath = Join-Path $verifyDir 'proc\boot\pci_server.cfg'
 $startupCheckPath = Join-Path $verifyDir 'proc\boot\startup.sh'
 $config = Get-Content -LiteralPath $configPath -Raw
 $startupCheck = Get-Content -LiteralPath $startupCheckPath -Raw
-foreach ($required in @('PCI_SERVER_MODULE_LIST=/lib/dll/pci/pci_server-event_handler.so',
-        'DO_BUS_CONFIG=yes', 'PCI_SERVER_BUSCFG_MODULE=/lib/dll/pci/pci_server-buscfg-hotplug.so')) {
+if ($BaselinePciServer) {
+    $requiredConfig = @('DO_BUS_CONFIG=no')
+} elseif ($EventHandlerOnly) {
+    $requiredConfig = @('PCI_SERVER_MODULE_LIST=/lib/dll/pci/pci_server-event_handler.so', 'DO_BUS_CONFIG=no')
+} else {
+    $requiredConfig = @('PCI_SERVER_MODULE_LIST=/lib/dll/pci/pci_server-event_handler.so',
+        'DO_BUS_CONFIG=yes', "PCI_SERVER_BUSCFG_MODULE=$buscfgModule")
+}
+foreach ($required in $requiredConfig) {
     if ($config -notmatch [regex]::Escape($required)) {
         throw "Built IFS config is missing: $required"
     }
 }
-foreach ($required in @('/proc/boot/quiver-pci-rm &', '/proc/boot/pci_hotplug_cycle.sh 60 &')) {
-    if (-not $startupCheck.Contains($required)) {
-        throw "Built IFS startup is missing: $required"
+if (-not $BaselinePciServer) {
+    foreach ($required in @('/proc/boot/quiver-pci-rm &')) {
+        if (-not $startupCheck.Contains($required)) {
+            throw "Built IFS startup is missing: $required"
+        }
     }
 }
 

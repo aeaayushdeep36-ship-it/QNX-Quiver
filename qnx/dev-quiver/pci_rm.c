@@ -31,6 +31,9 @@
 typedef struct {
     pci_devhdl_t handle;
     void *bar2_mapping;
+    pci_bdf_t known_bdf;
+    int known_bdf_valid;
+    int recovery_diagnostic_reported;
 } quiver_pci_t;
 
 typedef struct {
@@ -89,6 +92,11 @@ static int attach_and_map(quiver_pci_t *pci, uint32_t *magic_out,
     int bar_count = (int)(sizeof(bars) / sizeof(bars[0]));
     pci_ba_t *bar2 = NULL;
     uint16_t superblock_bytes;
+    pci_err_t known_vid_error = PCI_ERR_OK;
+    pci_err_t known_did_error = PCI_ERR_OK;
+    pci_vid_t known_vendor = PCI_VID_ANY;
+    pci_did_t known_device = PCI_DID_ANY;
+    int known_bdf_matches = 0;
 
     if (ThreadCtl(_NTO_TCTL_IO, 0) == -1) {
         if (!quiet) {
@@ -98,36 +106,72 @@ static int attach_and_map(quiver_pci_t *pci, uint32_t *magic_out,
         return -1;
     }
 
-    bdf = pci_device_find(0, QUIVER_PCI_VENDOR, QUIVER_PCI_DEVICE, PCI_CCODE_ANY);
+    bdf = PCI_BDF_NONE;
+    if (pci->known_bdf_valid) {
+        known_vid_error = pci_device_read_vid(pci->known_bdf, &known_vendor);
+        if (known_vid_error == PCI_ERR_OK &&
+            known_vendor == QUIVER_PCI_VENDOR) {
+            known_did_error = pci_device_read_did(pci->known_bdf, &known_device);
+            known_bdf_matches = known_did_error == PCI_ERR_OK &&
+                                known_device == QUIVER_PCI_DEVICE;
+        }
+        if (known_bdf_matches) {
+            bdf = pci->known_bdf;
+        }
+    }
     if (bdf == PCI_BDF_NONE) {
+        bdf = pci_device_find(0, QUIVER_PCI_VENDOR, QUIVER_PCI_DEVICE,
+                              PCI_CCODE_ANY);
+    }
+    if (bdf == PCI_BDF_NONE) {
+        if (quiet && pci->known_bdf_valid &&
+            !pci->recovery_diagnostic_reported) {
+            fprintf(stderr,
+                    "QNX-Quiver: recovery probe at B%u:D%u:F%u: "
+                    "VID %04x (%s), DID %04x (%s); PCI database has no match\n",
+                    PCI_BUS(pci->known_bdf), PCI_DEV(pci->known_bdf),
+                    PCI_FUNC(pci->known_bdf), known_vendor,
+                    pci_strerror(known_vid_error), known_device,
+                    pci_strerror(known_did_error));
+            pci->recovery_diagnostic_reported = 1;
+        }
         if (!quiet) {
             fprintf(stderr, "QNX-Quiver: PCI device %04x:%04x not found\n",
                     QUIVER_PCI_VENDOR, QUIVER_PCI_DEVICE);
         }
         return -1;
     }
+    pci->known_bdf = bdf;
+    pci->known_bdf_valid = 1;
 
     pci->handle = pci_device_attach(bdf, pci_attachFlags_EXCLUSIVE_OWNER, &error);
     if (pci->handle == NULL) {
-        if (!quiet) {
+        if (!quiet || (pci->known_bdf_valid &&
+                       !pci->recovery_diagnostic_reported)) {
             fprintf(stderr, "QNX-Quiver: pci_device_attach: %s (%d)\n",
                     pci_strerror(error), error);
+            pci->recovery_diagnostic_reported = 1;
         }
         return -1;
     }
+    pci->recovery_diagnostic_reported = 0;
 
     error = pci_device_read_ba(pci->handle, &bar_count, bars,
                                pci_reqType_e_UNSPECIFIED);
     if (error != PCI_ERR_OK) {
-        if (!quiet) {
+        if (!quiet || (pci->known_bdf_valid &&
+                       !pci->recovery_diagnostic_reported)) {
             fprintf(stderr, "QNX-Quiver: pci_device_read_ba: %s (%d)\n",
                     pci_strerror(error), error);
+            pci->recovery_diagnostic_reported = 1;
         }
         return -1;
     }
     if (bar_count < 0 || bar_count > (int)(sizeof(bars) / sizeof(bars[0]))) {
-        if (!quiet) {
+        if (!quiet || (pci->known_bdf_valid &&
+                       !pci->recovery_diagnostic_reported)) {
             fprintf(stderr, "QNX-Quiver: invalid BAR count: %d\n", bar_count);
+            pci->recovery_diagnostic_reported = 1;
         }
         return -1;
     }
@@ -139,9 +183,11 @@ static int attach_and_map(quiver_pci_t *pci, uint32_t *magic_out,
     }
     if (bar2 == NULL || bar2->type != pci_asType_e_MEM ||
         bar2->size < QV_BAR2_BYTES) {
-        if (!quiet) {
+        if (!quiet || (pci->known_bdf_valid &&
+                       !pci->recovery_diagnostic_reported)) {
             fprintf(stderr, "QNX-Quiver: BAR2 is absent, not memory, or smaller than %u bytes\n",
                     QV_BAR2_BYTES);
+            pci->recovery_diagnostic_reported = 1;
         }
         return -1;
     }
@@ -627,7 +673,7 @@ int main(void)
     int attach_id = -1;
     int exit_status = EXIT_FAILURE;
     int unavailable_reported = 0;
-    quiver_pci_t pci = {NULL, NULL};
+    quiver_pci_t pci = {0};
     quiver_device_t device;
     resmgr_attr_t resource_attributes;
     resmgr_connect_funcs_t connect_functions;
@@ -663,19 +709,28 @@ int main(void)
     io_functions.read = quiver_read;
     io_functions.devctl = quiver_devctl;
     if (attach_and_map(&pci, &magic, &version, &shared_bytes,
-                       &bar2_address, 0) == -1) {
-        exit_status = EXIT_FAILURE;
-        goto cleanup;
+                       &bar2_address, 1) == -1) {
+        /*
+         * Remain resident when the device is absent at startup. This is
+         * required for a later PCI insertion to recover without restarting
+         * the manager. The public node stays withdrawn until BAR2 and the
+         * protocol have both been validated.
+         */
+        (void)release_pci(&pci);
+        fprintf(stderr,
+                "QNX-Quiver: starting offline; waiting for PCI device/server recovery\n");
+        unavailable_reported = 1;
+    } else {
+        if (publish_node(dispatch, &attach_id, &device, &resource_attributes,
+                         &connect_functions, &io_functions, magic, version,
+                         shared_bytes, bar2_address, pci.bar2_mapping) == -1) {
+            goto cleanup;
+        }
+        printf("QNX-Quiver: resident at %s; BAR2=0x%" PRIx64
+               " (%" PRIu32 " bytes), QVB1 v%u\n",
+               QUIVER_DEVICE_PATH, bar2_address, shared_bytes, version);
+        fflush(stdout);
     }
-    if (publish_node(dispatch, &attach_id, &device, &resource_attributes,
-                     &connect_functions, &io_functions, magic, version,
-                     shared_bytes, bar2_address, pci.bar2_mapping) == -1) {
-        goto cleanup;
-    }
-    printf("QNX-Quiver: resident at %s; BAR2=0x%" PRIx64
-           " (%" PRIu32 " bytes), QVB1 v%u\n",
-           QUIVER_DEVICE_PATH, bar2_address, shared_bytes, version);
-    fflush(stdout);
     if (stopping) {
         exit_status = EXIT_SUCCESS;
         goto cleanup;
