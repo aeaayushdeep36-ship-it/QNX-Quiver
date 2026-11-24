@@ -142,7 +142,7 @@ Copy-Item -LiteralPath (Join-Path $targetRoot 'boot\sys\procnto-smp-instr') -Des
 
 $testComponents = if ($BaselinePciServer) { @() } else { @('quiver-pci-rm', 'quiver-pci-db-probe', 'pci_hotplug_wait.sh', 'pci_hotplug_cycle.sh') }
 $serviceComponents = if ($IncludeServices) {
-    @('quiver-client-probe', 'dev-can-quiver', 'quiver-can-probe',
+    @('quiver-client-probe', 'dev-can-quiver', 'quiver-can-probe', 'quiver-can-saturation-probe',
       'quiver-imu', 'quiver-actuator', 'quiver-trace',
       'quiver-controller', 'quiver-supervisor')
 } else { @() }

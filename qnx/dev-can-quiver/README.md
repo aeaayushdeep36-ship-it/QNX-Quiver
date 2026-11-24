@@ -14,4 +14,6 @@ build/quiver-can-probe
 
 The probe sends an extended 64-byte frame and verifies byte-for-byte loopback and counters. This is a virtual-bus check; it does not test physical arbitration, bit timing, error counters, or transceiver behavior.
 
+`build/quiver-can-saturation-probe` verifies TX backpressure. Start the QNX manager and CAN DDK service, pause the host simulator, and run the probe in the guest. It fills the usable TX ring and requires `EAGAIN` on the next frame. Resume the simulator and confirm it drains the queued frames. On the disposable QNX 8.0 guest, 4,094 frames were accepted, the next write returned `EAGAIN`, and the ring drained after simulator restart.
+
 The policy fragment includes a CAN process type but is not active in the supplied guest. Merge it with the target policy, add the image-specific PCI-server channel permission, and verify allowed/denied access under enforcement before production.

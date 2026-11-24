@@ -4,8 +4,8 @@ SECPOLCOMPILE ?= secpolcompile
 CFLAGS ?= -std=c11 -D_QNX_SOURCE -Wall -Wextra -Werror -O2
 INCLUDES = -Iinclude
 
-.PHONY: all protocol-check pci-service pci-rm pci-client client-probe can-ddk can-probe peripheral-services supervisor policy-check host-test clean
-all: protocol-check pci-service pci-rm pci-client client-probe can-ddk can-probe peripheral-services supervisor policy-check
+.PHONY: all protocol-check pci-service pci-rm pci-client client-probe can-ddk can-probe can-saturation-probe peripheral-services supervisor policy-check host-test clean
+all: protocol-check pci-service pci-rm pci-client client-probe can-ddk can-probe can-saturation-probe peripheral-services supervisor policy-check
 
 protocol-check: build/protocol-check
 build/protocol-check: qnx/protocol_check.c include/quiver_protocol.h
@@ -35,6 +35,10 @@ can-probe: build/quiver-can-probe
 build/quiver-can-probe: qnx/dev-can-quiver/can_probe.c build/quiver-client.o include/quiver_client.h include/quiver_protocol.h
 	$(QCC) -V$(QCC_TARGET) $(CFLAGS) $(INCLUDES) -o $@ qnx/dev-can-quiver/can_probe.c build/quiver-client.o
 
+can-saturation-probe: build/quiver-can-saturation-probe
+build/quiver-can-saturation-probe: qnx/dev-can-quiver/can_saturation_probe.c include/quiver_protocol.h
+	$(QCC) -V$(QCC_TARGET) $(CFLAGS) $(INCLUDES) -o $@ qnx/dev-can-quiver/can_saturation_probe.c
+
 peripheral-services: build/quiver-imu build/quiver-actuator build/quiver-trace build/quiver-controller
 build/quiver-imu: qnx/services/imu_service.c qnx/services/quiver_services.h include/quiver_client.h include/quiver_protocol.h build/quiver-client.o
 	$(QCC) -V$(QCC_TARGET) $(CFLAGS) $(INCLUDES) -Iqnx/services -o $@ qnx/services/imu_service.c build/quiver-client.o -lm
@@ -58,4 +62,4 @@ host-test:
 	python3 host/sim_engine/quiver_sim.py --self-test
 
 clean:
-	$(RM) build/protocol-check build/quiver-pci-service build/quiver-pci-rm build/quiver-client.o build/quiver-client-probe build/dev-can-quiver build/quiver-can-probe build/quiver-imu build/quiver-actuator build/quiver-trace build/quiver-controller build/quiver-supervisor build/qnx_quiver_policy_fragment.bin
+	$(RM) build/protocol-check build/quiver-pci-service build/quiver-pci-rm build/quiver-client.o build/quiver-client-probe build/dev-can-quiver build/quiver-can-probe build/quiver-can-saturation-probe build/quiver-imu build/quiver-actuator build/quiver-trace build/quiver-controller build/quiver-supervisor build/qnx_quiver_policy_fragment.bin

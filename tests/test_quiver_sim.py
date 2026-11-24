@@ -67,6 +67,16 @@ class QuiverProtocolTests(unittest.TestCase):
         bad_id = qv.struct.pack("<IBBH", 0x1ABCDE, 8, qv.CAN_FLAG_FD, 0) + data
         self.assertFalse(qv.can_frame_valid(qv.TYPE_CAN, bad_id))
 
+    def test_can_tx_ring_full_reports_backpressure(self):
+        payload = qv.struct.pack("<IBBH", 0x1ABCDE, 64,
+                                 qv.CAN_FLAG_FD | qv.CAN_FLAG_EXTENDED, 0) + bytes(64)
+        for sequence in range(qv.RING_SLOTS - 1):
+            self.assertTrue(self.shared.ring_push(1, qv.TYPE_CAN, sequence,
+                                                  payload, sequence=sequence))
+        self.assertFalse(self.shared.ring_push(1, qv.TYPE_CAN, 999999,
+                                               payload, sequence=999999))
+        self.assertEqual(self.shared.atomic_load32(qv.RING_OFFSETS[1] + 8), 1)
+
     def test_actuator_bounds_ack_id_and_expiry_contract(self):
         payload = qv.struct.pack("<IfIIQ", 0, 0.5, 50, 0, 123) + bytes(88)
         self.assertEqual(qv.decode_actuator(qv.TYPE_ACTUATOR, payload),
