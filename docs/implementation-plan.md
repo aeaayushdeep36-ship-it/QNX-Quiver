@@ -20,7 +20,7 @@ Build a QNX SDP 8.0 x86_64 virtual embedded platform that connects a determinist
 3. **PCI removal/reinsert:** identify a QEMU/QNX topology where QNX receives slot notifications and its hotplug bus-configuration module restores BARs. Pass QMP event/inventory and QNX `/dev/quiver` withdrawal/republication checks. Host-forced eject acknowledgment and PCI-server stop/restart remain separate partial evidence, not a full hotplug pass.
 4. **CAN and peripheral services:** v3 CAN-FD echo, bus-off/recovery status, RX drop accounting, timestamped IMU delivery, actuator rejection/acknowledgement/TTL-to-zero, trace output, and controller stale fail-safe now have guest runtime evidence. Add a controlled TX ring saturation/backpressure exercise and repeat after restart/reconnect.
 5. **Security:** merge into the product boot policy, add the exact PCI-server channel rule, launch components with distinct process types, and demonstrate both allowed and denied operations under enforcement.
-6. **Supervision and handoff:** run repeated startup, child failure/restart, partial outage, and shutdown exercises; follow the codelab from a clean environment.
+6. **Supervision and handoff:** the disposable guest verified supervisor startup/readiness, child restart, and coordinated SIGTERM shutdown. Repeat cold starts and verify manager partial-outage recovery; follow the updated codelab from a clean environment.
 7. **Hardware boundary:** physical CAN or PCI behavior is explicitly out of scope without hardware. QEMU virtual tests do not validate electrical behavior.
 
 ## Verified evidence and limits

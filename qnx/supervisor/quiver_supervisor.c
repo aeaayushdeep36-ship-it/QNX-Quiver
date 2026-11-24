@@ -11,6 +11,9 @@
 
 #define CHILD_COUNT 4u
 #define PATH_CAPACITY 512u
+#define INITIAL_RESTART_MS 250u
+#define MAX_RESTART_MS 30000u
+#define STABLE_RUN_NS UINT64_C(5000000000)
 
 typedef struct {
     const char *name;
@@ -19,6 +22,9 @@ typedef struct {
     pid_t pid;
     unsigned restart_delay_ms;
     uint64_t restart_at_ns;
+    uint64_t started_at_ns;
+    int wait_status;
+    int wait_observed;
 } child_t;
 
 static volatile sig_atomic_t stopping;
@@ -52,6 +58,9 @@ static int start_child(child_t *child)
         _exit(127);
     }
     child->pid = pid;
+    child->started_at_ns = monotonic_ns();
+    child->wait_status = 0;
+    child->wait_observed = 0;
     printf("QNX-Quiver supervisor: started %s pid=%ld\n",
            child->name, (long)pid);
     return 0;
@@ -68,30 +77,96 @@ static int wait_for_quiver_node(unsigned timeout_ms)
     return -1;
 }
 
+static int process_exists(pid_t pid)
+{
+    if (pid <= 0) return 0;
+    if (kill(pid, 0) == 0) return 1;
+    return errno == EPERM;
+}
+
+/* Some QNX DDK workers can outlive the thread whose status waitpid observes.
+ * Do not launch a replacement or forget a PID until the process is gone. */
+static int child_exited(child_t *child)
+{
+    if (child->pid <= 0) return 1;
+    if (!child->wait_observed) {
+        pid_t result = waitpid(child->pid, &child->wait_status, WNOHANG);
+        if (result == child->pid || (result == -1 && errno == ECHILD)) {
+            child->wait_observed = 1;
+        } else if (result == 0 || (result == -1 && errno == EINTR)) {
+            return 0;
+        } else if (result == -1) {
+            fprintf(stderr, "QNX-Quiver supervisor: waitpid %s: %s\n",
+                    child->name, strerror(errno));
+            return 0;
+        }
+    }
+    if (process_exists(child->pid)) return 0;
+
+    uint64_t now = monotonic_ns();
+    if (now >= child->started_at_ns &&
+        now - child->started_at_ns >= STABLE_RUN_NS) {
+        child->restart_delay_ms = INITIAL_RESTART_MS;
+    }
+    child->restart_at_ns = now +
+        (uint64_t)child->restart_delay_ms * UINT64_C(1000000);
+    fprintf(stderr, "QNX-Quiver supervisor: %s exited (status=%d); retry in %u ms\n",
+            child->name, child->wait_status, child->restart_delay_ms);
+    if (child->restart_delay_ms < MAX_RESTART_MS / 2u) {
+        child->restart_delay_ms *= 2u;
+    } else {
+        child->restart_delay_ms = MAX_RESTART_MS;
+    }
+    child->pid = -1;
+    child->wait_observed = 0;
+    return 1;
+}
+
+static int any_children_running(child_t children[], size_t count)
+{
+    int running = 0;
+    for (size_t i = 0; i < count; ++i) {
+        if (children[i].pid > 0 && !child_exited(&children[i])) running = 1;
+    }
+    return running;
+}
+
 static void stop_children(child_t children[], size_t count)
 {
     for (size_t i = 0; i < count; ++i) {
         if (children[i].pid > 0) (void)kill(children[i].pid, SIGTERM);
     }
     uint64_t deadline = monotonic_ns() + UINT64_C(5000000000);
-    while (monotonic_ns() < deadline) {
-        int running = 0;
-        for (size_t i = 0; i < count; ++i) {
-            if (children[i].pid > 0 &&
-                waitpid(children[i].pid, NULL, WNOHANG) == children[i].pid) {
-                children[i].pid = -1;
-            }
-            if (children[i].pid > 0) running = 1;
-        }
-        if (!running) return;
+    while (monotonic_ns() < deadline && any_children_running(children, count)) {
         sleep_ms(50);
     }
     for (size_t i = 0; i < count; ++i) {
-        if (children[i].pid > 0) {
+        if (children[i].pid > 0 && process_exists(children[i].pid)) {
             (void)kill(children[i].pid, SIGKILL);
-            (void)waitpid(children[i].pid, NULL, 0);
-            children[i].pid = -1;
         }
+    }
+    deadline = monotonic_ns() + UINT64_C(2000000000);
+    for (;;) {
+        int running = 0;
+        for (size_t i = 0; i < count; ++i) {
+            if (children[i].pid > 0 && process_exists(children[i].pid)) {
+                running = 1;
+                break;
+            }
+        }
+        if (!running || monotonic_ns() >= deadline) break;
+        sleep_ms(20);
+    }
+    for (size_t i = 0; i < count; ++i) {
+        if (children[i].pid > 0 && process_exists(children[i].pid)) {
+            fprintf(stderr, "QNX-Quiver supervisor: failed to stop %s pid=%ld\n",
+                    children[i].name, (long)children[i].pid);
+            continue;
+        }
+        if (children[i].pid > 0 && !children[i].wait_observed)
+            (void)waitpid(children[i].pid, NULL, WNOHANG);
+        children[i].pid = -1;
+        children[i].wait_observed = 0;
     }
 }
 
@@ -112,12 +187,12 @@ int main(int argc, char **argv)
         return EXIT_FAILURE;
     }
     child_t pci = {.name = "PCI resource manager", .pid = -1,
-                   .restart_delay_ms = 250};
+                   .restart_delay_ms = INITIAL_RESTART_MS};
     child_t children[CHILD_COUNT] = {
-        {.name = "CAN RX", .pid = -1, .restart_delay_ms = 250},
-        {.name = "CAN TX", .pid = -1, .restart_delay_ms = 250},
-        {.name = "IMU consumer", .pid = -1, .restart_delay_ms = 250},
-        {.name = "trace capture", .pid = -1, .restart_delay_ms = 250}
+        {.name = "CAN RX", .pid = -1, .restart_delay_ms = INITIAL_RESTART_MS},
+        {.name = "CAN TX", .pid = -1, .restart_delay_ms = INITIAL_RESTART_MS},
+        {.name = "IMU consumer", .pid = -1, .restart_delay_ms = INITIAL_RESTART_MS},
+        {.name = "trace capture", .pid = -1, .restart_delay_ms = INITIAL_RESTART_MS}
     };
     (void)snprintf(pci.path, sizeof(pci.path), "%s/quiver-pci-rm", bin_dir);
     pci.argv[0] = pci.path;
@@ -134,13 +209,9 @@ int main(int argc, char **argv)
 
     if (start_child(&pci) == -1) return EXIT_FAILURE;
     while (!stopping && wait_for_quiver_node(30000u) == -1) {
-        int child_status;
-        if (waitpid(pci.pid, &child_status, WNOHANG) == pci.pid) {
-            fprintf(stderr, "QNX-Quiver supervisor: PCI manager exited; retrying\n");
+        if (child_exited(&pci)) {
             sleep_ms(pci.restart_delay_ms);
-            pci.restart_delay_ms = pci.restart_delay_ms < 15000u
-                                       ? pci.restart_delay_ms * 2u : 30000u;
-            if (start_child(&pci) == -1) break;
+            if (!stopping && start_child(&pci) == -1) break;
         } else {
             fprintf(stderr, "QNX-Quiver supervisor: /dev/quiver not ready; retrying\n");
         }
@@ -151,46 +222,22 @@ int main(int argc, char **argv)
     while (!stopping) {
         uint64_t now = monotonic_ns();
         if (pci.pid > 0) {
-            int pci_status;
-            if (waitpid(pci.pid, &pci_status, WNOHANG) == pci.pid) {
-                fprintf(stderr, "QNX-Quiver supervisor: PCI manager exited (status=%d)\n",
-                        pci_status);
-                pci.pid = -1;
-                pci.restart_at_ns = now +
-                    (uint64_t)pci.restart_delay_ms * 1000000u;
-                if (pci.restart_delay_ms < 15000u) pci.restart_delay_ms *= 2u;
-                if (pci.restart_delay_ms > 30000u) pci.restart_delay_ms = 30000u;
-            }
+            (void)child_exited(&pci);
         } else if (now >= pci.restart_at_ns) {
-            if (start_child(&pci) == 0) pci.restart_delay_ms = 250u;
+            (void)start_child(&pci);
         }
         for (size_t i = 0; i < CHILD_COUNT; ++i) {
             child_t *child = &children[i];
             if (child->pid > 0) {
-                int child_status;
-                pid_t result = waitpid(child->pid, &child_status, WNOHANG);
-                if (result == child->pid) {
-                    fprintf(stderr, "QNX-Quiver supervisor: %s exited (status=%d)\n",
-                            child->name, child_status);
-                    child->pid = -1;
-                    child->restart_at_ns = now +
-                        (uint64_t)child->restart_delay_ms * 1000000u;
-                    if (child->restart_delay_ms < 15000u)
-                        child->restart_delay_ms *= 2u;
-                    if (child->restart_delay_ms > 30000u)
-                        child->restart_delay_ms = 30000u;
-                }
+                (void)child_exited(child);
             } else if (now >= child->restart_at_ns && access("/dev/quiver", R_OK) == 0) {
-                if (start_child(child) == 0) child->restart_delay_ms = 250u;
+                (void)start_child(child);
             }
         }
         sleep_ms(100);
     }
     fprintf(stdout, "QNX-Quiver supervisor: shutting down\n");
     stop_children(children, CHILD_COUNT);
-    if (pci.pid > 0) {
-        (void)kill(pci.pid, SIGTERM);
-        (void)waitpid(pci.pid, NULL, 0);
-    }
+    stop_children(&pci, 1);
     return EXIT_SUCCESS;
 }

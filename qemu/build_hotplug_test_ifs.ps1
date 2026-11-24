@@ -6,6 +6,7 @@ param(
     [switch]$EventHandlerOnly,
     [switch]$BaselinePciServer,
     [switch]$IncludeServices,
+    [switch]$SupervisorMode,
     [switch]$Buscfg2,
     [switch]$KeepWork
 )
@@ -18,6 +19,9 @@ $buscfgModule = if ($Buscfg2) {
 }
 if ($Buscfg2 -and ($EventHandlerOnly -or $BaselinePciServer)) {
     throw '-Buscfg2 requires the full hotplug test profile'
+}
+if ($SupervisorMode -and (-not $IncludeServices -or $BaselinePciServer)) {
+    throw '-SupervisorMode requires -IncludeServices and the full test PCI profile'
 }
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 if (-not $OutputIfs) {
@@ -220,7 +224,7 @@ $startupPattern = '(?m)^(\s*chmod a\+rx /dev/pci/server_id_1)\s*$'
 if ($startup -notmatch $startupPattern) {
     throw 'Could not find the point after PCI-server startup in startup.sh'
 }
-if (-not $BaselinePciServer) {
+if (-not $BaselinePciServer -and -not $SupervisorMode) {
     $startup = [regex]::Replace($startup, $startupPattern,
         '$1' + "`r`n`r`necho `"---> Starting QNX-Quiver PCI resource manager`"`r`n /proc/boot/quiver-pci-rm &", 1)
 }
@@ -262,7 +266,7 @@ foreach ($required in $requiredConfig) {
         throw "Built IFS config is missing: $required"
     }
 }
-if (-not $BaselinePciServer) {
+if (-not $BaselinePciServer -and -not $SupervisorMode) {
     foreach ($required in @('/proc/boot/quiver-pci-rm &')) {
         if (-not $startupCheck.Contains($required)) {
             throw "Built IFS startup is missing: $required"

@@ -21,6 +21,7 @@ Updated 25 November 2026. Source completion, compile checks, host tests, and gue
 - The guest IMU client consumed advancing timestamped samples. A valid actuator command was acknowledged; an out-of-range command was rejected locally; a later fault snapshot showed the host output returned to zero after TTL expiry. Trace capture produced 10 rows plus its CSV header. With `IMU_STUCK` injected, the controller reported stale input and sent the safe zero command.
 - A corrected root-bus test derived the ACPI eject bit from QMP PCI inventory. With the host-injected eject acknowledgment, QEMU emitted removal and the QNX manager withdrew `/dev/quiver` after `PCI_ERR_ENOTSUP`. Reinsertion enumerated in QEMU but BAR0/BAR2 stayed unassigned; the harness reported `UNVERIFIED`. This still does not prove native QNX eject acknowledgment or successful reinsert recovery.
 - Stopping PCI server in the current interactive test withdrew `/dev/quiver`. Restarting it on this QEMU 10.2.1 i440fx run triggered QEMU's `iotlb_to_section` assertion before client recovery could be checked. Prior PCI-server restart recovery evidence predates the v3 guest build; current v3 recovery therefore remains a gate.
+- The first supervisor guest run exposed repeated CAN child launches: QNX returned a child wait status while the associated DDK process still existed. The supervisor now verifies process disappearance before restarting or forgetting a PID, preserves exponential backoff until a child has run stably, and waits for process exit during shutdown. The fixed guest run held two CAN endpoints stable, restarted a killed trace child, and stopped the manager and all supervised children on SIGTERM; `/dev/quiver` was withdrawn.
 
 ## Verified on the development host
 
@@ -39,7 +40,7 @@ Updated 25 November 2026. Source completion, compile checks, host tests, and gue
 
 ## Runtime gates and limits
 
-- The v3 manager, client, CAN DDK, IMU, actuator, trace, and controller flows now have disposable guest runtime evidence as recorded above. The supervisor's startup ordering, readiness, child restart, partial outage, and coordinated shutdown still need a dedicated guest exercise.
+- The v3 manager, client, CAN DDK, IMU, actuator, trace, controller, and supervisor startup/readiness/child-restart/shutdown flows now have disposable guest runtime evidence as recorded above. Manager partial-outage recovery and repeated cold-start exercises remain open.
 - The supplied guest has no active `/proc/boot/secpol.bin`. The exact PCI-server type/connect permission depends on the product image. Merge the fragment, identify the PCI-server type with `secpolmonitor`, assign per-service types, and test both permitted and denied operations before production.
 - CAN-FD loopback, blocked RX wake on resumed traffic (earlier guest build), bus-off/recovery status, and RX drop accounting have virtual guest evidence. This proves neither physical arbitration nor transceiver timing or electrical behavior.
 - Timing output reports p50/p95/p99/max wake lateness, measured rate, and deadline misses. Results from the Python simulator on a general-purpose Windows/WSL host are characterization data, not a real-time acceptance guarantee.

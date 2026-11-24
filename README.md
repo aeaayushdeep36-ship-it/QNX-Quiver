@@ -32,7 +32,7 @@ bash qemu/launch_qnx_quiver_wsl.sh
 bash qemu/run_quiver_sim_wsl.sh
 ```
 
-Build a disposable test IFS with the current v3 client and service binaries by running `qemu/build_hotplug_test_ifs.ps1 -IncludeServices`. The guest uses a snapshot disk. For software PCI lifecycle tests, the QMP script needs the WSL-visible shared file path; see [tests/README.md](tests/README.md) for the command. A successful QMP `device_del` reply is not enough: acceptance requires `DEVICE_DELETED`, inventory change, `/dev/quiver` withdrawal, BAR assignment after reinsertion, and service republication. On QNX 8.0 + QEMU 10.2.1, host-acknowledged removal works on the root bus but reinsertion leaves BARs unassigned; full software hotplug remains unverified.
+Build a disposable test IFS with the current v3 client and service binaries by running `qemu/build_hotplug_test_ifs.ps1 -IncludeServices`. Use `-SupervisorMode` for a separate image where the supervisor owns PCI-manager startup. The guest uses a snapshot disk. For software PCI lifecycle tests, the QMP script needs the WSL-visible shared file path; see [tests/README.md](tests/README.md) for the command. A successful QMP `device_del` reply is not enough: acceptance requires `DEVICE_DELETED`, inventory change, `/dev/quiver` withdrawal, BAR assignment after reinsertion, and service republication. On QNX 8.0 + QEMU 10.2.1, host-acknowledged removal works on the root bus but reinsertion leaves BARs unassigned; full software hotplug remains unverified.
 
 ## QNX guest flow
 
