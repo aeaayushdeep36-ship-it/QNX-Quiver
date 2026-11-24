@@ -2,16 +2,25 @@
 
 ## Host protocol suite
 
-Run `python -m unittest discover -s tests -v` or `make host-test`. The tests cover protocol v3 initialization and rejection of old/malformed mappings, ring full/wraparound and serialized work-sharing, fault snapshot timeout after a stalled writer, CAN-FD record validation, actuator bounds/acknowledgement/rejection/TTL-to-zero, and concurrent host counter updates. `python host/sim_engine/quiver_sim.py --self-test` also checks ring capacity, wraparound, fault controls, and concurrent updates.
+Run `python -m unittest discover -s tests -v` or `make host-test`. The tests cover protocol v3 initialization and rejection of old or malformed mappings, ring full/wraparound and serialized work-sharing, fault snapshot timeout after a stalled writer, CAN-FD record validation, actuator bounds/acknowledgement/rejection/TTL-to-zero, concurrent host counter updates, and PCI-slot lookup for ACPI eject handling. `python host/sim_engine/quiver_sim.py --self-test` checks ring capacity, wraparound, fault controls, and concurrent updates.
 
 ## QNX guest checks
 
-`qnx/dev-quiver/client_probe.c` exercises the PCI client API. `qnx/dev-can-quiver/can_probe.c` exercises CAN-FD loopback, blocking RX wake, node draining, and CAN state queries. The v3 binaries compile in the installed SDP 8.0 toolchain, but the new v3 protocol/services still need deployment to the guest for end-to-end runtime checks.
+`qnx/dev-quiver/client_probe.c` exercises the PCI client API. `qnx/dev-can-quiver/can_probe.c` exercises CAN-FD loopback, blocking RX wake, node draining, and CAN state queries. The v3 resource manager, client probe, CAN FD echo and state transitions, IMU delivery, actuator acknowledgement/rejection/expiry, trace capture, and controller stale-data fail-safe have passed disposable QNX guest checks. The development supervisor still needs a guest exercise covering readiness, restart/backoff, partial failure, and shutdown.
 
 ## QEMU PCI lifecycle
 
-The QMP harness checks `DEVICE_DELETED`, PCI inventory, BAR geometry, and BAR addresses. The existing PCI-bridge path can be exercised with `python3 tests/qemu_pci_hotplug.py --port 4443`; guest-side acceptance additionally requires the watcher to observe `/dev/quiver` withdrawal and republication.
+The QMP harness checks `DEVICE_DELETED`, PCI inventory, BAR geometry, and BAR addresses. It creates a fresh memory-backend object mapped to the supplied shared file before removal, derives the ACPI eject bitmap bit from live PCI inventory, and reuses the original root-bus slot on reinsertion. Run it inside WSL with the QEMU-visible backing-file path:
 
-On the current QNX 8.0 + QEMU 10.2.1 setup, the default i440fx configuration does not complete removal. A full test IFS with event-handler and hotplug bus-configuration modules does not fix the PCI-bridge path. On the i440fx root bus, a host-injected ACPI eject acknowledgment (`HMP o /w 0xae08 0x10`) makes QEMU remove the function and the QNX manager withdraw `/dev/quiver`; this does not prove QNX handled the eject event. Reinsertion enumerates in QEMU but both BAR addresses remain `-1`, so the QNX manager cannot remap BAR2 and the harness reports `UNVERIFIED`. For this root-bus experiment use `python3 tests/qemu_pci_hotplug.py --port 4444 --bus pci.0 --address 0x4 --memdev qnx_shm_reinsert --acpi-eject-ack`. Each reinsert attempt needs a fresh QEMU memory-backend object ID mapped to the same shared-memory file; QEMU 10.2.1 asserts if an attachment reuses the same backend object. PCI-server stop/restart remains separate passing recovery evidence. No physical hardware is required to continue this software-only investigation.
+```sh
+python3 tests/qemu_pci_hotplug.py --port 4443 --bus pci.0 \
+  --memdev qnx_shm_reinsert \
+  --mem-path '/mnt/d/Freelance/QNX Quiver/build/qnx_quiver_shm_v3.bin' \
+  --acpi-eject-ack
+```
 
-Additional software-only checks on Q35 confirm that the service publishes `/dev/quiver` when the host simulator has initialized the BAR2 protocol and QNX has assigned BAR0/BAR2. Booting empty keeps the manager resident, but QMP hot-add leaves the function's BARs unassigned and the QNX PCI database unchanged; QMP removal does not complete, even with the ACPI eject write. The test IFS includes `quiver-pci-db-probe` and `pci-tool` to inspect QNX enumeration and device ownership. The probe confirms the manager’s exclusive attach when the protocol is valid. Actual insertion/removal recovery therefore remains unverified on this software stack.
+A host-injected ACPI acknowledgment is diagnostic only and does not prove QNX generated or processed the eject acknowledgment. Guest-side acceptance also requires observing `/dev/quiver` withdrawal and republication.
+
+On QNX 8.0 + QEMU 10.2.1, default i440fx removal did not complete, and adding event-handler and hotplug bus-configuration modules did not fix the PCI-bridge path. Earlier host-acknowledged removal withdrew `/dev/quiver`, but did not prove QNX handled the eject event. Reinsertion previously appeared in QEMU with BARs unassigned, so the manager correctly stayed offline. The harness now derives the eject bit from live PCI inventory and creates a fresh backend mapped to the same BAR2 file. PCI-server stop/restart recovery is documented for an earlier guest build; the current v3 test hit a QEMU assertion during restart. Actual insertion/removal recovery remains unverified; no physical hardware is required for this software-only investigation.
+
+Additional Q35 checks showed that an online test manager can own the ivshmem device and publish `/dev/quiver`, while QMP removal does not complete and QMP hot-add leaves BARs unassigned and the QNX PCI database unchanged. The bundled PCI probe and `pci-tool` are available for guest enumeration and ownership diagnostics.

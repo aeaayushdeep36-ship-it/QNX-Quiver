@@ -5,6 +5,7 @@ param(
     [string]$OutputIfs,
     [switch]$EventHandlerOnly,
     [switch]$BaselinePciServer,
+    [switch]$IncludeServices,
     [switch]$Buscfg2,
     [switch]$KeepWork
 )
@@ -136,10 +137,17 @@ foreach ($name in @('multiboot.boot', 'startup-x86', 'procnto-smp-instr')) {
 Copy-Item -LiteralPath (Join-Path $targetRoot 'boot\sys\procnto-smp-instr') -Destination (Join-Path $sourceRoot 'procnto-smp-instr') -Force
 
 $testComponents = if ($BaselinePciServer) { @() } else { @('quiver-pci-rm', 'quiver-pci-db-probe', 'pci_hotplug_wait.sh', 'pci_hotplug_cycle.sh') }
+$serviceComponents = if ($IncludeServices) {
+    @('quiver-client-probe', 'dev-can-quiver', 'quiver-can-probe',
+      'quiver-imu', 'quiver-actuator', 'quiver-trace',
+      'quiver-controller', 'quiver-supervisor')
+} else { @() }
+$testComponents += $serviceComponents
 foreach ($relativePath in $testComponents) {
     $sourcePath = switch ($relativePath) {
         'quiver-pci-rm' { Join-Path $projectRoot 'build\quiver-pci-rm' }
         'quiver-pci-db-probe' { Join-Path $projectRoot 'build\quiver-pci-db-probe' }
+        { $_ -in $serviceComponents } { Join-Path $projectRoot (Join-Path 'build' $relativePath) }
         default { Join-Path $projectRoot (Join-Path 'qnx' $relativePath) }
     }
     if (-not (Test-Path -LiteralPath $sourcePath)) {
@@ -194,6 +202,9 @@ if (-not $EventHandlerOnly -and -not $BaselinePciServer) {
 }
 if (-not $BaselinePciServer) {
     $moduleManifest += "`r`n[+raw] usr/sbin/pci-tool`r`nusr/lib/libncurses.so.6`r`nusr/lib/libpanelw.so.6`r`nterminfo/q/qansi=usr/share/terminfo/q/qansi`r`nquiver-pci-rm`r`nquiver-pci-db-probe`r`npci_hotplug_wait.sh`r`npci_hotplug_cycle.sh"
+    foreach ($component in $serviceComponents) {
+        $moduleManifest += "`r`n$component"
+    }
 }
 $manifest = [regex]::Replace($manifest, '(?m)^sbin/pci-server\s*$', '$0' + "`r`n$moduleManifest", 1)
 if (-not $BaselinePciServer -and $manifest -notmatch '(?m)^quiver-pci-rm\s*$') {

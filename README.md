@@ -32,7 +32,7 @@ bash qemu/launch_qnx_quiver_wsl.sh
 bash qemu/run_quiver_sim_wsl.sh
 ```
 
-For a software PCI lifecycle test, launch the guest with `QNX_PCI_TOPOLOGY=pci-bridge-hotplug`. Load both QNX PCI event-handler and hotplug bus-configuration modules using [qnx/pci_server_hotplug.cfg](qnx/pci_server_hotplug.cfg), then follow the remove/reinsert steps in [qnx/README.md](qnx/README.md). A successful QMP `device_del` reply is not enough: the test requires `DEVICE_DELETED`, inventory change, `/dev/quiver` withdrawal, and reacquisition. The current i440fx/PCI-bridge test still does not complete removal even with those modules active; software hotplug remains open pending a QEMU topology that QNX supports.
+Build a disposable test IFS with the current v3 client and service binaries by running `qemu/build_hotplug_test_ifs.ps1 -IncludeServices`. The guest uses a snapshot disk. For software PCI lifecycle tests, the QMP script needs the WSL-visible shared file path; see [tests/README.md](tests/README.md) for the command. A successful QMP `device_del` reply is not enough: acceptance requires `DEVICE_DELETED`, inventory change, `/dev/quiver` withdrawal, BAR assignment after reinsertion, and service republication. On QNX 8.0 + QEMU 10.2.1, host-acknowledged removal works on the root bus but reinsertion leaves BARs unassigned; full software hotplug remains unverified.
 
 ## QNX guest flow
 

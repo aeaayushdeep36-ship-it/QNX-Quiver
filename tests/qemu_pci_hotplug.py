@@ -88,6 +88,36 @@ def inventory_find_device(pci, device_id):
     return None
 
 
+def inventory_device_slot(pci, device_id):
+    """Return the root PCI slot number used by QEMU's ACPI eject bitmap."""
+    def on_bus(bus, root_slot=None):
+        for device in bus.get("devices", []):
+            slot = device.get("slot")
+            if device.get("qdev_id") == device_id:
+                return slot if root_slot is None else root_slot
+            bridge = device.get("pci_bridge")
+            if bridge:
+                found = on_bus({"devices": bridge.get("devices", [])},
+                               slot if root_slot is None else root_slot)
+                if found is not None:
+                    return found
+        return None
+    for bus in pci:
+        found = on_bus(bus)
+        if found is not None:
+            return found
+    return None
+
+
+def inventory_root_slot(pci, device_id):
+    """Return the slot only when the function is directly on the root bus."""
+    for bus in pci:
+        for device in bus.get("devices", []):
+            if device.get("qdev_id") == device_id:
+                return device.get("slot")
+    return None
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", default="127.0.0.1")
@@ -97,15 +127,19 @@ def main():
     parser.add_argument("--bus", help="QEMU bus for reinsertion (defaults to --bridge)")
     parser.add_argument("--address",
                         help="optional PCI address for reinsertion on --bus")
-    parser.add_argument("--memdev", default="qnx_shm",
-                        help="memory backend id passed to ivshmem-plain")
+    parser.add_argument("--memdev", default="qnx_shm_reinsert",
+                        help="fresh memory backend id for the reinserted device")
+    parser.add_argument("--mem-path", required=True,
+                        help="QEMU-host path to the shared 4 MiB BAR2 backing file")
+    parser.add_argument("--mem-size", type=lambda value: int(value, 0),
+                        default=0x400000,
+                        help="shared memory backend size (default: 4 MiB)")
     parser.add_argument("--acpi-eject-ack", action="store_true",
                         help="write the i440fx ACPI eject acknowledgment via HMP")
     parser.add_argument("--acpi-eject-port", type=lambda value: int(value, 0),
                         default=0xAE08, help="ACPI PCI eject register I/O port")
     parser.add_argument("--acpi-eject-mask", type=lambda value: int(value, 0),
-                        default=0x10,
-                        help="32-bit eject bit mask for the device slot")
+                        help="override eject mask; default derives it from QMP PCI slot")
     parser.add_argument("--timeout", type=float, default=15.0)
     parser.add_argument("--hold-removed-seconds", type=float, default=3.0,
                         help="wait for QNX clients to withdraw before reinsertion")
@@ -113,16 +147,37 @@ def main():
     insert_bus = args.bus or args.bridge
     qmp = QMP(args.host, args.port, args.timeout)
     removed_successfully = False
+    backend_created = False
     try:
         before = qmp.command("query-pci")
-        if inventory_find_device(before, args.device) is None:
+        initial_device = inventory_find_device(before, args.device)
+        if initial_device is None:
             raise RuntimeError(f"{args.device} is absent before test")
+        if args.mem_size != 0x400000:
+            raise RuntimeError("BAR2 backing file must be exactly 4 MiB")
+        # Create the fresh backend before removal so a setup error cannot
+        # strand the running guest without its original device.
+        qmp.command("object-add", {
+            "qom-type": "memory-backend-file",
+            "id": args.memdev,
+            "size": args.mem_size,
+            "share": True,
+            "mem-path": args.mem_path,
+        })
+        backend_created = True
         qmp.command("device_del", {"id": args.device})
         if args.acpi_eject_ack:
             # This is a host-injected guest ACPI acknowledgment, not evidence
             # that QNX's PCI event handler processed the eject notification.
+            slot = inventory_device_slot(before, args.device)
+            if args.acpi_eject_mask is None:
+                if slot is None or slot < 0 or slot >= 32:
+                    raise RuntimeError("cannot derive ACPI eject bit from PCI inventory")
+                eject_mask = 1 << slot
+            else:
+                eject_mask = args.acpi_eject_mask
             qmp.command("human-monitor-command", {"command-line":
-                f"o /w 0x{args.acpi_eject_port:x} 0x{args.acpi_eject_mask:x}"})
+                f"o /w 0x{args.acpi_eject_port:x} 0x{eject_mask:x}"})
         if not qmp.wait_event("DEVICE_DELETED", args.device, args.timeout):
             after = qmp.command("query-pci")
             if inventory_find_device(after, args.device) is not None:
@@ -136,6 +191,8 @@ def main():
         removed_successfully = True
         if args.hold_removed_seconds > 0:
             time.sleep(args.hold_removed_seconds)
+        # QEMU 10.2.1 can assert if ivshmem reuses the same memory backend for
+        # another attachment. The fresh object above maps the same BAR2 file.
         add_arguments = {
             "driver": "ivshmem-plain",
             "memdev": args.memdev,
@@ -144,6 +201,10 @@ def main():
         }
         if args.address is not None:
             add_arguments["addr"] = args.address
+        elif insert_bus == "pci.0":
+            root_slot = inventory_root_slot(before, args.device)
+            if root_slot is not None:
+                add_arguments["addr"] = f"0x{root_slot:x}"
         qmp.command("device_add", add_arguments)
         added = qmp.command("query-pci")
         device = inventory_find_device(added, args.device)
@@ -184,6 +245,12 @@ def main():
                           file=sys.stderr)
             except Exception as error:
                 print(f"CLEANUP WARNING: could not restore ivshmem: {error}",
+                      file=sys.stderr)
+        elif backend_created:
+            try:
+                qmp.command("object-del", {"id": args.memdev})
+            except Exception as error:
+                print(f"CLEANUP WARNING: could not remove unused memory backend: {error}",
                       file=sys.stderr)
         qmp.close()
 

@@ -1,16 +1,22 @@
 # QNX-Quiver codelab
 
-This walkthrough uses QNX SDP 8.0 x86_64, the supplied QNX guest image, and Ubuntu WSL QEMU 10.2.1. It is a software-only virtual platform. The latest source and host checks are recorded in `../docs/implementation-status.md`; protocol v3 must be used on both sides.
+This walkthrough targets QNX SDP 8.0 x86_64 with Ubuntu WSL QEMU 10.2.1. It uses a disposable QNX test IFS and a snapshot disk, so guest filesystem changes are discarded when QEMU exits. Protocol v3 is required on both sides.
 
-## 1. Build and run local checks
+## 1. Build and validate
 
-In a QNX SDP command prompt, from the project root:
+From a QNX SDP command prompt at the project root:
 
 ```sh
 make clean all
 ```
 
-On the development host:
+Build a disposable IFS containing the v3 client and service utilities from PowerShell:
+
+```powershell
+.\qemu\build_hotplug_test_ifs.ps1 -IncludeServices -OutputIfs .\build\ifs-v3-services-test.bin
+```
+
+Run the host checks:
 
 ```sh
 python -m unittest discover -s tests -v
@@ -18,64 +24,86 @@ python host/sim_engine/quiver_sim.py --self-test
 python host/sim_engine/quiver_sim.py --duration 2 --latency-spike-us 500
 ```
 
-The last run prints measured rate, p50/p95/p99/max wake lateness, and deadline misses. These measurements characterize the host scheduler; they are not real-time guarantees.
+Timing output characterizes the host scheduler; it is not a real-time guarantee.
 
-## 2. Boot QNX and the host plant
+## 2. Boot the guest and simulator
 
-In Ubuntu WSL, use one terminal for QEMU and another for the simulator:
+In separate Ubuntu WSL terminals, start the QNX guest and host plant:
 
 ```sh
-bash qemu/launch_qnx_quiver_wsl.sh
+QNX_IFS_IMAGE="/mnt/d/Freelance/QNX Quiver/build/ifs-v3-services-test.bin" \
+  QUIVER_HEADLESS=1 QNX_SERIAL_BACKEND=stdio \
+  bash qemu/launch_qnx_quiver_wsl.sh
+```
+
+```sh
 bash qemu/run_quiver_sim_wsl.sh
 ```
 
-Both commands default to `build/qnx_quiver_shm_v3.bin`. Keep them in WSL: Windows and WSL did not observe coherent live writes through the same DrvFS file. QEMU uses `-snapshot`, so guest disk writes are discarded at exit.
+Keep both processes in WSL. They map the same v3 BAR2 file. QEMU uses `-snapshot`, so the VM disk is not modified by the session. The test IFS starts `pci-server` and the Quiver manager; its serial shell can run the embedded probes under `/proc/boot`.
 
-In the QNX guest, verify that `pci-tool -v` lists `1af4:1110`, BAR0 is 256 bytes, and BAR2 is 4 MiB. Start the resource manager:
-
-```sh
-build/quiver-pci-rm
-build/quiver-client-probe
-```
-
-Expected result: `/dev/quiver` is present and the API reports QVB1 v3. The client probe reads info, counters, and a coherent fault snapshot through devctl.
-
-## 3. Run CAN and peripheral examples
-
-Start CAN RX and TX as separate processes, then run the loopback probe:
+Run the protocol and ownership probes:
 
 ```sh
-build/dev-can-quiver rx &
-build/dev-can-quiver tx &
-build/quiver-can-probe
-build/quiver-can-probe --status
+/proc/boot/quiver-client-probe
+/proc/boot/quiver-pci-db-probe
 ```
 
-The probe sends an extended 64-byte CAN-FD frame and checks the returned payload. For a bus-off transition, set `fault busoff` in the simulator console, query `build/quiver-can-probe --status`, clear the fault, and query again. The status generation should advance for each transition.
+Expect QVB1 v3 geometry/counters and an exclusive-attach error from the PCI database probe because the manager owns the device.
 
-Run one IMU ring consumer at a time:
+## 3. Run the CAN and peripheral checks
+
+Start RX and TX separately, then test CAN-FD echo and endpoint state:
 
 ```sh
-build/quiver-imu --stale-ms 100 --duration 5
-build/quiver-controller
+/proc/boot/dev-can-quiver rx &
+/proc/boot/dev-can-quiver tx &
+/proc/boot/quiver-can-probe
+/proc/boot/quiver-can-probe --status
 ```
 
-The controller consumes the same ring and sends bounded commands; it emits zero after 100 ms without a fresh sample. Send an individual actuator command with `build/quiver-actuator 0.25 100`; the tool waits for its command-ID acknowledgement. `build/quiver-trace /tmp/quiver-trace.csv --duration 5` records fault and telemetry snapshots without consuming ring records.
-
-## 4. Verify removal and recovery in software
-
-No physical PCI card is needed. Boot with the bridge topology:
+The probe must echo the extended ID and all 64 data bytes. To exercise bus-off, set the fault through another WSL shell while QEMU and the simulator are running:
 
 ```sh
-QNX_PCI_TOPOLOGY=pci-bridge-hotplug QNX_IFS_IMAGE=/path/to/test-ifs.bin bash qemu/launch_qnx_quiver_wsl.sh
+python3 - <<'PY'
+import sys
+from pathlib import Path
+sys.path.insert(0, "/mnt/d/Freelance/QNX Quiver/host/sim_engine")
+import quiver_sim
+shared = quiver_sim.SharedMemory(Path("/mnt/d/Freelance/QNX Quiver/build/qnx_quiver_shm_v3.bin"))
+shared.set_faults(quiver_sim.FAULT_CAN_BUSOFF)
+shared.close()
+PY
 ```
 
-Create a throwaway test IFS with `qnx/pci_server_hotplug.cfg` embedded as `/proc/boot/pci_server.cfg`, and make the boot command start `pci-server --aspace-enable --config=/proc/boot/pci_server.cfg` before any PCI client. This config enables bus reconfiguration, so don't apply it by restarting PCI in a working non-snapshot system. Transfer the rebuilt `quiver-pci-rm` and `pci_hotplug_wait.sh` into the guest and start the manager. In one guest shell run `sh /tmp/pci_hotplug_wait.sh removed 30`. In WSL run `python3 tests/qemu_pci_hotplug.py --port 4443`; the port must match `QNX_QMP_PORT` if overridden. The harness holds the device absent for three seconds so the manager's health poll can withdraw `/dev/quiver`. When QMP completes reinsertion, run `sh /tmp/pci_hotplug_wait.sh reinserted 30` in the guest.
+Query `/proc/boot/quiver-can-probe --status` and expect bus-off with an increased transition generation. Repeat the snippet with `shared.set_faults(0)` and verify active state and another generation increment. For the controller stale-data check below, change the fault argument to `shared.set_faults(quiver_sim.FAULT_IMU_STUCK)`.
 
-The test passes only when QMP receives `DEVICE_DELETED`, `query-pci` shows the function removed and reinserted, and QNX withdraws then republishes `/dev/quiver`. The default guest config did not complete removal in the attempted test: QMP accepted `device_del`, but the device remained enumerated. Load the PCI event handler and hotplug bus configuration modules before interpreting a run as successful. This still cannot prove electrical link loss on real hardware.
+Run peripheral examples in the guest:
+
+```sh
+/proc/boot/quiver-imu --duration 2
+/proc/boot/quiver-actuator 0.25 100
+/proc/boot/quiver-actuator 2 100   # expected local bounds rejection
+/proc/boot/quiver-trace /tmp/quiver-trace.csv --duration 1
+```
+
+Verify actuator acknowledgement and expiry to zero in `/proc/boot/quiver-client-probe`, and confirm the trace CSV has a header and records. To check controller stale-data handling, start `/proc/boot/quiver-controller` in the guest, set `FAULT_IMU_STUCK` with the WSL snippet, and verify the controller logs stale input and sends zero. Clear all faults with `shared.set_faults(0)` and stop the controller with SIGTERM.
+
+## 4. Check virtual PCI removal and reinsertion
+
+Actual PCI hot-unplug does not need physical hardware. The current QNX 8.0 + QEMU 10.2.1 setup has not passed a full cycle. For a root-bus diagnostic, use a guest with the hotplug PCI server config, leave the test manager online, and run in WSL:
+
+```sh
+python3 tests/qemu_pci_hotplug.py --port 4443 --bus pci.0 \
+  --memdev qnx_shm_reinsert \
+  --mem-path "/mnt/d/Freelance/QNX Quiver/build/qnx_quiver_shm_v3.bin" \
+  --acpi-eject-ack
+```
+
+The harness derives the ACPI eject bit from live inventory and creates a fresh shared memory backend before removal. The injected ACPI acknowledgment is host-generated diagnostic behavior, not proof of QNX's native event handling. Current evidence is that QEMU removes the device, QNX withdraws `/dev/quiver`, but reinserted BAR0/BAR2 remain unassigned and the manager stays offline. Treat `UNVERIFIED` as a failed acceptance gate. A complete pass requires QNX-observed removal, successful BAR reconfiguration after insertion, and `/dev/quiver` republication.
 
 ## 5. Security and cleanup
 
-The policy fragment compiles, but the supplied guest has no active `/proc/boot/secpol.bin`. Merge it into the product policy, identify the exact PCI-server channel type with `secpolmonitor`, assign service types, and verify allowed and denied operations under enforcement before deployment.
+The policy fragment compiles but is not active in the supplied guest. Product integration must merge it into the target image policy, determine the PCI-server process type, apply distinct service types, and test allowed and denied API access under enforcement. Physical CAN arbitration and electrical behavior are outside this software-only test.
 
-Stop the simulator with `quit` or Ctrl+C; stop guest services with SIGTERM. Close QEMU after each run. The generated shared file contains protocol telemetry only and can be removed after all QEMU and simulator processes have exited.
+Stop the simulator with Ctrl+C. Exit QEMU with Ctrl+A then X, or Ctrl+C in its PTY. Check that both WSL processes have exited before reusing or removing the shared backing file.

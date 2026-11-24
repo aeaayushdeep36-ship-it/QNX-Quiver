@@ -29,9 +29,9 @@ It remains in the foreground. Stop it with `slay -s SIGTERM quiver-pci-rm`; the 
 
 ## Recovery evidence
 
-PCI-server stop/restart recovery passed in the earlier QNX guest build: `/dev/quiver` disappeared after `PCI_ERR_SERVER_NOT_AVAILABLE`, then returned after `pci-server` restarted. That runtime test predates protocol v3. The v3 sources cross-compile, but need a fresh deployment/runtime pass.
+PCI-server stop/restart recovery passed in an earlier QNX guest build. In the current v3 disposable guest, stopping `pci-server` withdrew `/dev/quiver` after `PCI_ERR_SERVER_NOT_AVAILABLE`; restarting it triggered a QEMU 10.2.1 i440fx `iotlb_to_section` assertion before node republication could be checked. Full v3 server-restart recovery remains open on this QEMU topology.
 
-The default guest and hotplug-module test IFS do not complete removal on the current i440fx PCI-bridge topology. On i440fx root bus, QEMU removes the function only after a host-injected ACPI eject acknowledgment; the manager then withdraws `/dev/quiver`, but this does not prove QNX handled the eject event. Reinsertion appears in QEMU but BAR0/BAR2 are unassigned, so the manager correctly stays offline. The updated QMP test reports that as `UNVERIFIED`. PCI-server stop/restart is separately verified; full PCI hot-unplug/reinsert remains open and can be investigated without physical hardware.
+The default guest and hotplug-module test IFS do not complete removal on the current i440fx PCI-bridge topology. On i440fx root bus, QEMU removes the function only after a host-injected ACPI eject acknowledgment; the manager then withdraws `/dev/quiver`, but this does not prove QNX handled the eject event. Reinsertion appears in QEMU but BAR0/BAR2 are unassigned, so the manager correctly stays offline. The updated QMP test reports that as `UNVERIFIED`. PCI-server stop/restart succeeded on an earlier guest build; the current v3 retry hit a QEMU assertion before recovery could be checked. Full PCI hot-unplug/reinsert remains open and can be investigated without physical hardware.
 
 ## One-shot bring-up and fault investigation
 
