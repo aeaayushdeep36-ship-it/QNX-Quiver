@@ -53,3 +53,13 @@ dkms.conf
 
 # debug information files
 *.dwo
+
+# QNX-Quiver generated and transient files
+/build/*
+!/build/.gitkeep
+/traces/*
+!/traces/.gitkeep
+__pycache__/
+*.py[cod]
+*.kev
+*.log

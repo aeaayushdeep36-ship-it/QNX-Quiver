@@ -1,0 +1,1 @@
+The host protocol self-check is available as python host/sim_engine/quiver_sim.py --self-test. It validates BAR2 initialization, ring publish/consume, and fault-bank updates using a temporary mapping. It does not emulate QNX hardware or substitute for guest verification.

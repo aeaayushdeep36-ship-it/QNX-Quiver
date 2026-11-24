@@ -1,0 +1,23 @@
+# QNX-Quiver least-privilege policy fragment for a target integration.
+# Start the three QNX-Quiver processes with `on -T` using these types.
+type quiver_pci_t;
+type quiver_can_t;
+type quiver_can_client_t;
+
+# PCI resource manager: claim/map the device through pci-server and publish
+# only the client API node. PCI-server channel-connect permission is BSP/image
+# specific; add the exact pci-server type observed with secpolmonitor.
+allow quiver_pci_t self:ability { io public_channel pathspace };
+allow_attach quiver_pci_t /dev/quiver quiver_pci_t;
+mount_point 0 : 0 rw-rw---- /dev/quiver;
+
+# CAN bridge: expose only the libcan raw RX/TX nodes and connect to /dev/quiver.
+allow quiver_can_t self:ability { public_channel pathspace };
+allow_attach quiver_can_t /dev/can0/... quiver_can_t;
+mount_point 0 : 0 r-------- /dev/can0/rx0;
+mount_point 0 : 0 -w------- /dev/can0/tx0;
+allow quiver_can_t quiver_pci_t : channel connect;
+
+# CAN clients can open the two CAN nodes and read only the restricted PCI API.
+allow quiver_can_client_t quiver_can_t : channel connect;
+allow quiver_can_client_t quiver_pci_t : channel connect;
