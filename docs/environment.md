@@ -14,7 +14,7 @@ Discovery and verification date: 24 November 2026.
 - Windows QEMU 11.1.0 does not expose `ivshmem-plain`.
 - Ubuntu WSL QEMU 10.2.1 exposes `ivshmem-plain` and boots the supplied QNX guest at `C:\Users\Lenovo\qnxvm\output\ifs.bin` with its disk in snapshot mode.
 - `QNX_PCI_TOPOLOGY=pci-bridge-hotplug` retains the working i440fx/EIDE topology and places ivshmem behind a PCI bridge. `query-pci` showed device `1af4:1110` on bus 1 with BAR0 256 bytes and BAR2 4 MiB.
-- In the default guest configuration, QMP `device_del` returned but did not complete removal: no `DEVICE_DELETED` event arrived and the device remained in `query-pci`. The test PCI-server config loads the supplied QNX PCI event-handler and hotplug bus-configuration modules; device-removal behavior with those modules active remains to be run.
+- In the default guest configuration, QMP `device_del` returned but did not complete removal: no `DEVICE_DELETED` event arrived and the device remained in `query-pci`. The test IFS loaded the matching QNX 8.0 PCI server, libpci, hardware module, capability modules, event handler, and hotplug bus-configuration module. PCI server startup completed, but logs reported link events unsupported; another `device_del` still produced no event and left ivshmem in `query-pci`. Removal/reinsert remains unverified on this i440fx topology.
 - The SSH forwarding port defaults to 2223 and QMP defaults to 4443; both are configurable in the WSL launcher.
 
 ## Shared-memory boundary
