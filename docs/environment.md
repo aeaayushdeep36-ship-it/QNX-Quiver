@@ -1,6 +1,6 @@
 # QNX-Quiver development environment
 
-Discovery and verification date: 24 November 2026.
+Discovery and verification date: 25 November 2026.
 
 ## QNX SDP 8.0
 
@@ -23,4 +23,4 @@ For live updates, run both QEMU and the host simulator inside WSL against `build
 
 ## Validation boundary
 
-Host protocol tests and the QNX cross-build pass. Earlier QNX guest checks verified PCI-server restart recovery, CAN-FD loopback, blocking RX wake, and signal-driven node cleanup on the pre-v3 binaries. The v3 service binaries need a new guest deployment and runtime pass. The supplied guest has no active `/proc/boot/secpol.bin`, so the policy fragment has not been tested under runtime enforcement. No physical CAN transceiver or PCI device is available; QEMU software tests cannot establish electrical behavior.
+Host protocol tests and the QNX cross-build pass. The v3 manager, CAN-FD, IMU, actuator, trace, controller, and supervisor flows have disposable guest evidence. Supervisor startup, child restart, coordinated shutdown, PCI-manager-process outage recovery, and two fresh cold boots passed. Current QEMU 10.2.1 still asserts during v3 PCI-server restart; software hot-unplug/reinsert still does not pass BAR assignment. The supplied guest has no active `/proc/boot/secpol.bin`, so product policy enforcement remains unverified. No physical CAN transceiver or PCI device is available; QEMU software tests cannot establish electrical behavior.

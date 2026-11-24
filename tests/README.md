@@ -6,7 +6,7 @@ Run `python -m unittest discover -s tests -v` or `make host-test`. The tests cov
 
 ## QNX guest checks
 
-`qnx/dev-quiver/client_probe.c` exercises the PCI client API. `qnx/dev-can-quiver/can_probe.c` exercises CAN-FD loopback, blocking RX wake, node draining, and CAN state queries. The v3 resource manager, client probe, CAN FD echo and state transitions, IMU delivery, actuator acknowledgement/rejection/expiry, trace capture, controller stale-data fail-safe, and supervisor readiness/child-restart/shutdown have passed disposable QNX guest checks. Manager partial-outage recovery and repeated supervisor cold starts remain unverified.
+`qnx/dev-quiver/client_probe.c` exercises the PCI client API. `qnx/dev-can-quiver/can_probe.c` exercises CAN-FD loopback, blocking RX wake, node draining, and CAN state queries. The v3 resource manager, client probe, CAN FD echo and state transitions, IMU delivery, actuator acknowledgement/rejection/expiry, trace capture, controller stale-data fail-safe, and supervisor readiness/child-restart/shutdown have passed disposable QNX guest checks. A deliberate PCI-manager-process outage and two repeated supervisor cold starts also passed; dependent clients were stopped and relaunched after `/dev/quiver` returned. PCI-server stop/restart recovery remains unverified on the current QEMU topology.
 
 ## QEMU PCI lifecycle
 

@@ -216,21 +216,37 @@ int main(int argc, char **argv)
             fprintf(stderr, "QNX-Quiver supervisor: /dev/quiver not ready; retrying\n");
         }
     }
+    int services_active = 0;
     if (!stopping && access("/dev/quiver", R_OK) == 0) {
         for (size_t i = 0; i < CHILD_COUNT; ++i) (void)start_child(&children[i]);
+        services_active = 1;
     }
     while (!stopping) {
         uint64_t now = monotonic_ns();
+        int quiver_ready = access("/dev/quiver", R_OK) == 0;
         if (pci.pid > 0) {
             (void)child_exited(&pci);
         } else if (now >= pci.restart_at_ns) {
             (void)start_child(&pci);
         }
+        if (!quiver_ready && services_active) {
+            fprintf(stderr, "QNX-Quiver supervisor: /dev/quiver withdrawn; stopping dependent services\n");
+            stop_children(children, CHILD_COUNT);
+            services_active = 0;
+        } else if (quiver_ready && !services_active) {
+            fprintf(stdout, "QNX-Quiver supervisor: /dev/quiver ready; starting dependent services\n");
+            for (size_t i = 0; i < CHILD_COUNT; ++i) {
+                if (children[i].pid <= 0) (void)start_child(&children[i]);
+            }
+            services_active = 1;
+        }
         for (size_t i = 0; i < CHILD_COUNT; ++i) {
             child_t *child = &children[i];
-            if (child->pid > 0) {
+            if (!services_active) {
+                continue;
+            } else if (child->pid > 0) {
                 (void)child_exited(child);
-            } else if (now >= child->restart_at_ns && access("/dev/quiver", R_OK) == 0) {
+            } else if (now >= child->restart_at_ns && quiver_ready) {
                 (void)start_child(child);
             }
         }
