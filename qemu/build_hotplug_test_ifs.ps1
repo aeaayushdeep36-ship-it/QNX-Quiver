@@ -7,6 +7,7 @@ param(
     [switch]$BaselinePciServer,
     [switch]$IncludeServices,
     [switch]$SupervisorMode,
+    [switch]$PciOnly,
     [switch]$Buscfg2,
     [switch]$KeepWork
 )
@@ -22,6 +23,9 @@ if ($Buscfg2 -and ($EventHandlerOnly -or $BaselinePciServer)) {
 }
 if ($SupervisorMode -and (-not $IncludeServices -or $BaselinePciServer)) {
     throw '-SupervisorMode requires -IncludeServices and the full test PCI profile'
+}
+if ($PciOnly -and ($IncludeServices -or $SupervisorMode -or $BaselinePciServer -or $Buscfg2)) {
+    throw '-PciOnly requires the standard hotplug PCI profile without Quiver services'
 }
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 if (-not $OutputIfs) {
@@ -140,7 +144,7 @@ foreach ($name in @('multiboot.boot', 'startup-x86', 'procnto-smp-instr')) {
 }
 Copy-Item -LiteralPath (Join-Path $targetRoot 'boot\sys\procnto-smp-instr') -Destination (Join-Path $sourceRoot 'procnto-smp-instr') -Force
 
-$testComponents = if ($BaselinePciServer) { @() } else { @('quiver-pci-rm', 'quiver-pci-db-probe', 'pci_hotplug_wait.sh', 'pci_hotplug_cycle.sh') }
+$testComponents = if ($BaselinePciServer -or $PciOnly) { @() } else { @('quiver-pci-rm', 'quiver-pci-db-probe', 'pci_hotplug_wait.sh', 'pci_hotplug_cycle.sh') }
 $serviceComponents = if ($IncludeServices) {
     @('quiver-client-probe', 'dev-can-quiver', 'quiver-can-probe', 'quiver-can-saturation-probe',
       'quiver-imu', 'quiver-actuator', 'quiver-trace',
@@ -205,13 +209,16 @@ if (-not $EventHandlerOnly -and -not $BaselinePciServer) {
     $moduleManifest += "`r`n$buscfgModule=lib/dll/pci/$moduleName"
 }
 if (-not $BaselinePciServer) {
-    $moduleManifest += "`r`n[+raw] usr/sbin/pci-tool`r`nusr/lib/libncurses.so.6`r`nusr/lib/libpanelw.so.6`r`nterminfo/q/qansi=usr/share/terminfo/q/qansi`r`nquiver-pci-rm`r`nquiver-pci-db-probe`r`npci_hotplug_wait.sh`r`npci_hotplug_cycle.sh"
+    $moduleManifest += "`r`n[+raw] usr/sbin/pci-tool`r`nusr/lib/libncurses.so.6`r`nusr/lib/libpanelw.so.6`r`nterminfo/q/qansi=usr/share/terminfo/q/qansi"
+    if (-not $PciOnly) {
+        $moduleManifest += "`r`nquiver-pci-rm`r`nquiver-pci-db-probe`r`npci_hotplug_wait.sh`r`npci_hotplug_cycle.sh"
+    }
     foreach ($component in $serviceComponents) {
         $moduleManifest += "`r`n$component"
     }
 }
 $manifest = [regex]::Replace($manifest, '(?m)^sbin/pci-server\s*$', '$0' + "`r`n$moduleManifest", 1)
-if (-not $BaselinePciServer -and $manifest -notmatch '(?m)^quiver-pci-rm\s*$') {
+if (-not $BaselinePciServer -and -not $PciOnly -and $manifest -notmatch '(?m)^quiver-pci-rm\s*$') {
     throw 'Could not add the PCI resource manager to the test IFS'
 }
 Set-ItemProperty -LiteralPath $manifestPath -Name IsReadOnly -Value $false
@@ -224,9 +231,17 @@ $startupPattern = '(?m)^(\s*chmod a\+rx /dev/pci/server_id_1)\s*$'
 if ($startup -notmatch $startupPattern) {
     throw 'Could not find the point after PCI-server startup in startup.sh'
 }
-if (-not $BaselinePciServer -and -not $SupervisorMode) {
+if (-not $BaselinePciServer -and -not $SupervisorMode -and -not $PciOnly) {
     $startup = [regex]::Replace($startup, $startupPattern,
         '$1' + "`r`n`r`necho `"---> Starting QNX-Quiver PCI resource manager`"`r`n /proc/boot/quiver-pci-rm &", 1)
+}
+if ($PciOnly) {
+    $pciServerPattern = '(?m)^\s*pci-server --aspace-enable --config=/proc/boot/pci_server\.cfg\s*$'
+    if ($startup -notmatch $pciServerPattern) {
+        throw 'Could not find pci-server startup command for PCI trace profile'
+    }
+    $startup = [regex]::Replace($startup, $pciServerPattern,
+        ' PCI_BASE_VERBOSITY=5 pci-server -vv --aspace-enable --config=/proc/boot/pci_server.cfg', 1)
 }
 Set-ItemProperty -LiteralPath $startupPath -Name IsReadOnly -Value $false
 $startup = $startup.Replace("`r`n", "`n").Replace("`r", "`n")
@@ -266,7 +281,7 @@ foreach ($required in $requiredConfig) {
         throw "Built IFS config is missing: $required"
     }
 }
-if (-not $BaselinePciServer -and -not $SupervisorMode) {
+if (-not $BaselinePciServer -and -not $SupervisorMode -and -not $PciOnly) {
     foreach ($required in @('/proc/boot/quiver-pci-rm &')) {
         if (-not $startupCheck.Contains($required)) {
             throw "Built IFS startup is missing: $required"

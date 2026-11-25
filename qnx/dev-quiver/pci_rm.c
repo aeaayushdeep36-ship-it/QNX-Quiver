@@ -26,7 +26,9 @@
 #define QUIVER_PCI_DEVICE 0x1110u
 #define QUIVER_BAR2_NUMBER 2
 #define QUIVER_DEVICE_PATH "/dev/quiver"
+#define QUIVER_PCI_SERVER_NODE "/dev/pci/server_id_1"
 #define QUIVER_STATUS_CAPACITY 192u
+#define QUIVER_HEALTH_PULSE (_PULSE_CODE_MINAVAIL + 8)
 
 typedef struct {
     pci_devhdl_t handle;
@@ -44,17 +46,52 @@ typedef struct {
     int online;
 } quiver_device_t;
 
+typedef struct {
+    dev_t device;
+    ino_t inode;
+    int valid;
+} pci_server_identity_t;
+
 static int release_pci(quiver_pci_t *pci);
 
-static volatile sig_atomic_t stopping;
+static int pci_server_identity_changed(pci_server_identity_t *identity,
+                                      const char *server_node)
+{
+    struct stat status;
+    if (stat(server_node, &status) == -1) {
+        if (errno == ENOENT) {
+            identity->valid = 0;
+            return 0;
+        }
+        return -1;
+    }
+    if (!identity->valid || identity->device != status.st_dev ||
+        identity->inode != status.st_ino) {
+        identity->device = status.st_dev;
+        identity->inode = status.st_ino;
+        identity->valid = 1;
+        return 1;
+    }
+    return 0;
+}
 
-static int health_timeout_handler(message_context_t *ctp, int code,
-                                  unsigned flags, void *handle)
+static volatile sig_atomic_t stopping;
+static volatile sig_atomic_t health_tick_pending;
+static int health_tick_reported;
+
+static int health_pulse_handler(message_context_t *ctp, int code,
+                                unsigned flags, void *handle)
 {
     (void)ctp;
     (void)code;
     (void)flags;
     (void)handle;
+    health_tick_pending = 1;
+    if (!health_tick_reported) {
+        puts("QNX-Quiver: PCI health timer active");
+        fflush(stdout);
+        health_tick_reported = 1;
+    }
     return 0;
 }
 
@@ -671,38 +708,66 @@ static int quiver_read(resmgr_context_t *ctp, io_read_t *msg,
     return _RESMGR_NPARTS(1);
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
     dispatch_t *dispatch = NULL;
     dispatch_context_t *context = NULL;
+    int channel_id = -1;
+    int timer_coid = -1;
+    timer_t health_timer;
+    int health_timer_created = 0;
+    int restart_after_pci_server_change = 0;
     int attach_id = -1;
     int exit_status = EXIT_FAILURE;
     int unavailable_reported = 0;
+    pci_server_identity_t pci_server_identity = {0};
+    const char *pci_server_node = getenv("QNX_QUIVER_PCI_SERVER_NODE");
     quiver_pci_t pci = {0};
     quiver_device_t device;
     resmgr_attr_t resource_attributes;
     resmgr_connect_funcs_t connect_functions;
     resmgr_io_funcs_t io_functions;
-    struct timespec health_interval = {1, 0};
+    struct sigevent health_event;
+    struct itimerspec health_schedule = {
+        .it_value = {1, 0},
+        .it_interval = {1, 0}
+    };
     uint32_t magic = 0;
     uint16_t version = 0;
     uint32_t shared_bytes = 0;
     uint64_t bar2_address = 0;
+    (void)argc;
+    if (pci_server_node == NULL || pci_server_node[0] == '\0') {
+        pci_server_node = QUIVER_PCI_SERVER_NODE;
+    }
 
     memset(&device, 0, sizeof(device));
     if (install_shutdown_signals() == -1) {
         fprintf(stderr, "QNX-Quiver: signal setup: %s\n", strerror(errno));
         goto cleanup;
     }
-    if ((dispatch = dispatch_create()) == NULL) {
-        perror("QNX-Quiver: dispatch_create");
+    struct stat pci_server_status;
+    if (stat(pci_server_node, &pci_server_status) == 0) {
+        pci_server_identity.device = pci_server_status.st_dev;
+        pci_server_identity.inode = pci_server_status.st_ino;
+        pci_server_identity.valid = 1;
+    } else if (errno != ENOENT) {
+        fprintf(stderr, "QNX-Quiver: stat %s: %s\n",
+                pci_server_node, strerror(errno));
         goto cleanup;
     }
-
-    message_attr_t timeout_attributes = {.flags = MSG_FLAG_TIMEOUT_FUNC};
-    if (message_attach(dispatch, &timeout_attributes, 0, 0,
-                       health_timeout_handler, NULL) == -1) {
-        perror("QNX-Quiver: message_attach timeout handler");
+    channel_id = ChannelCreate(0);
+    if (channel_id == -1) {
+        perror("QNX-Quiver: ChannelCreate");
+        goto cleanup;
+    }
+    if ((dispatch = dispatch_create_channel(channel_id, 0)) == NULL) {
+        perror("QNX-Quiver: dispatch_create_channel");
+        goto cleanup;
+    }
+    if (pulse_attach(dispatch, 0, QUIVER_HEALTH_PULSE,
+                     health_pulse_handler, NULL) == -1) {
+        perror("QNX-Quiver: pulse_attach health timer");
         goto cleanup;
     }
 
@@ -747,16 +812,28 @@ int main(void)
         goto cleanup;
     }
 
+    timer_coid = ConnectAttach(0, 0, channel_id, _NTO_SIDE_CHANNEL, 0);
+    if (timer_coid == -1) {
+        perror("QNX-Quiver: ConnectAttach health timer");
+        goto cleanup;
+    }
+    SIGEV_PULSE_INIT(&health_event, timer_coid, SIGEV_PULSE_PRIO_INHERIT,
+                     QUIVER_HEALTH_PULSE, 0);
+    if (timer_create(CLOCK_MONOTONIC, &health_event, &health_timer) == -1) {
+        perror("QNX-Quiver: timer_create health timer");
+        goto cleanup;
+    }
+    health_timer_created = 1;
+    if (timer_settime(health_timer, 0, &health_schedule, NULL) == -1) {
+        perror("QNX-Quiver: timer_settime health timer");
+        goto cleanup;
+    }
+
     exit_status = EXIT_SUCCESS;
 
     while (!stopping) {
-        if (dispatch_timeout(dispatch, &health_interval) == -1) {
-            perror("QNX-Quiver: dispatch_timeout");
-            exit_status = EXIT_FAILURE;
-            break;
-        }
-        context = dispatch_block(context);
-        if (context == NULL) {
+        dispatch_context_t *received = dispatch_block(context);
+        if (received == NULL) {
             if (stopping && errno == EINTR) {
                 break;
             }
@@ -764,26 +841,55 @@ int main(void)
             exit_status = EXIT_FAILURE;
             break;
         }
-        /* QNX reports a timed-out dispatch context with rcvid == -1.
-         * Handle it directly so offline startup and recovery probes run on
-         * every health interval even when no client has opened /dev/quiver.
-         */
-        if (context->message_context.rcvid == -1) {
-            if (!stopping) {
-                check_device_health(dispatch, &attach_id, &device, &pci,
-                                    &resource_attributes, &connect_functions,
-                                    &io_functions, &unavailable_reported);
-            }
-            continue;
-        }
+        context = received;
         if (dispatch_handler(context) == -1) {
             perror("QNX-Quiver: dispatch_handler");
             exit_status = EXIT_FAILURE;
             break;
         }
+        int health_tick = health_tick_pending != 0;
+        health_tick_pending = 0;
+        if (health_tick && !stopping) {
+            int server_changed =
+                pci_server_identity_changed(&pci_server_identity,
+                                           pci_server_node);
+            if (server_changed == -1) {
+                fprintf(stderr, "QNX-Quiver: stat %s: %s\n",
+                        pci_server_node, strerror(errno));
+            } else if (server_changed == 1) {
+                fprintf(stderr,
+                        "QNX-Quiver: PCI-server instance changed; rebuilding libpci state\n");
+                device.online = 0;
+                device.bar2 = NULL;
+                withdraw_node(dispatch, &attach_id);
+                if (pci.bar2_mapping != NULL &&
+                    munmap(pci.bar2_mapping, QV_BAR2_BYTES) == -1) {
+                    fprintf(stderr,
+                            "QNX-Quiver: unmap BAR2 before PCI-server restart: %s\n",
+                            strerror(errno));
+                }
+                pci.bar2_mapping = NULL;
+                /* Do not call libpci with handles from the old server. */
+                pci.handle = NULL;
+                restart_after_pci_server_change = 1;
+                stopping = 1;
+            } else {
+                check_device_health(dispatch, &attach_id, &device, &pci,
+                                    &resource_attributes, &connect_functions,
+                                    &io_functions, &unavailable_reported);
+            }
+        }
     }
 
 cleanup:
+    if (health_timer_created && timer_delete(health_timer) == -1) {
+        perror("QNX-Quiver: timer_delete health timer");
+        exit_status = EXIT_FAILURE;
+    }
+    if (timer_coid != -1 && ConnectDetach(timer_coid) == -1) {
+        perror("QNX-Quiver: ConnectDetach health timer");
+        exit_status = EXIT_FAILURE;
+    }
     device.online = 0;
     device.bar2 = NULL;
     if (dispatch != NULL) {
@@ -798,11 +904,22 @@ cleanup:
             exit_status = EXIT_FAILURE;
         }
     }
+    if (release_pci(&pci) == EXIT_FAILURE) {
+        exit_status = EXIT_FAILURE;
+    }
     if (dispatch != NULL && dispatch_destroy(dispatch) == -1) {
         perror("QNX-Quiver: dispatch_destroy");
         exit_status = EXIT_FAILURE;
     }
-    if (release_pci(&pci) == EXIT_FAILURE) {
+    if (dispatch == NULL && channel_id != -1 &&
+        ChannelDestroy(channel_id) == -1) {
+        perror("QNX-Quiver: ChannelDestroy after dispatch setup failure");
+        exit_status = EXIT_FAILURE;
+    }
+    if (restart_after_pci_server_change) {
+        execvp(argv[0], argv);
+        fprintf(stderr, "QNX-Quiver: restart after PCI-server change: %s\n",
+                strerror(errno));
         exit_status = EXIT_FAILURE;
     }
     return exit_status;

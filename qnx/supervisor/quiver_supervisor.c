@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -82,6 +83,27 @@ static int process_exists(pid_t pid)
     if (pid <= 0) return 0;
     if (kill(pid, 0) == 0) return 1;
     return errno == EPERM;
+}
+
+static int select_trace_path(char *path, size_t capacity)
+{
+    static const char *directories[] = {"/tmp", "/dev/shmem"};
+    for (size_t i = 0; i < sizeof(directories) / sizeof(directories[0]); ++i) {
+        struct stat directory;
+        if (stat(directories[i], &directory) == -1 ||
+            !S_ISDIR(directory.st_mode) || access(directories[i], W_OK) == -1) {
+            continue;
+        }
+        int length = snprintf(path, capacity, "%s/%s", directories[i],
+                              "quiver-supervisor-trace.csv");
+        if (length < 0 || (size_t)length >= capacity) {
+            errno = ENAMETOOLONG;
+            return -1;
+        }
+        return 0;
+    }
+    errno = EACCES;
+    return -1;
 }
 
 /* Some QNX DDK workers can outlive the thread whose status waitpid observes.
@@ -186,6 +208,12 @@ int main(int argc, char **argv)
         perror("QNX-Quiver supervisor: sigaction");
         return EXIT_FAILURE;
     }
+    char trace_path[PATH_CAPACITY];
+    if (select_trace_path(trace_path, sizeof(trace_path)) == -1) {
+        fprintf(stderr,
+                "QNX-Quiver supervisor: no writable trace directory (/tmp or /dev/shmem)\n");
+        return EXIT_FAILURE;
+    }
     child_t pci = {.name = "PCI resource manager", .pid = -1,
                    .restart_delay_ms = INITIAL_RESTART_MS};
     child_t children[CHILD_COUNT] = {
@@ -204,10 +232,11 @@ int main(int argc, char **argv)
     children[1].argv[0] = children[1].path; children[1].argv[1] = "tx";
     children[2].argv[0] = children[2].path;
     children[3].argv[0] = children[3].path;
-    children[3].argv[1] = "/tmp/quiver-supervisor-trace.csv";
+    children[3].argv[1] = trace_path;
     for (size_t i = 0; i < CHILD_COUNT; ++i) children[i].restart_at_ns = 0;
 
     if (start_child(&pci) == -1) return EXIT_FAILURE;
+    printf("QNX-Quiver supervisor: trace output %s\n", trace_path);
     while (!stopping && wait_for_quiver_node(30000u) == -1) {
         if (child_exited(&pci)) {
             sleep_ms(pci.restart_delay_ms);
