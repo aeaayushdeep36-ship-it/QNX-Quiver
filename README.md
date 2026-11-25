@@ -45,9 +45,9 @@ build/quiver-can-probe
 build/quiver-can-probe --status
 ```
 
-Run one IMU-ring consumer at a time: `build/quiver-imu` or `build/quiver-controller`. `build/quiver-actuator value [ttl-ms]` sends a bounded command and waits for its command-ID acknowledgement. `build/quiver-trace [path.csv]` records fault and telemetry snapshots. `build/quiver-supervisor` coordinates development startup and restart; product use still requires distinct process types and a verified boot policy.
+Run one IMU-ring consumer at a time: `build/quiver-imu` or `build/quiver-controller`. `build/quiver-actuator value [ttl-ms]` sends a bounded command and waits for its command-ID acknowledgement. `build/quiver-trace [path.csv]` records fault and telemetry snapshots. `build/quiver-supervisor` coordinates startup and restart and uses `secpol_posix_spawnattr_settypeid()` to spawn each child (`quiver_pci_t`, `quiver_can_t`, `quiver_imu_t`, `quiver_trace_t`) under its own least-privilege type when a security policy is active.
 
-The security policy in `qnx/security/qnx_quiver.policy` is only a compile-checked fragment. The current guest has no active `/proc/boot/secpol.bin`, and the PCI-server channel type is image-specific; read the policy section in the QNX guide before product integration.
+`qnx/security/qnx_quiver.policy` is the Quiver integration fragment and `qnx/security/qemu_target_base.policy` is a `secpolgenerate`-derived target policy for the disposable QEMU guest. Immutable policy enforcement (`secpol -Q` -> `immutable`) has been verified in QEMU 10.2.1 snapshot mode (`pci-bridge-hotplug`) for both direct service launch (`build/ifs-quiver-policy-test.bin`, SHA256 `7D2BEC7FEA1D22309999DBA16E077F8AAAC8331A77F90C91F49AD3896B7A510F`) and typed supervisor launch (`build/ifs-quiver-supervisor-policy.bin`, SHA256 `D9AE8430C875566BC6EA8E71D13079DC63D3B74153746F4083390EF70CCE1DF3`), including `quiver_actuator_t` live acknowledgement and `quiver_denied_client_t` rejection (`EPERM`). For a production target image, replace `qemu_target_base.policy` with the target's complete active policy and type all remaining OS services; see [qnx/security/README.md](qnx/security/README.md).
 
 ## Project layout
 

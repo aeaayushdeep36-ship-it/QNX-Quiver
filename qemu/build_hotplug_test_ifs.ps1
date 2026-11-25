@@ -9,10 +9,19 @@ param(
     [switch]$SupervisorMode,
     [switch]$PciOnly,
     [switch]$Buscfg2,
+    [string]$ActivePolicySource,
+    [switch]$PolicySourceIncludesQuiver,
+    [string]$PciServerType = 'pci_server_t',
+    [string]$QuiverManagerType = 'quiver_pci_t',
+    [string]$DeniedClientType = 'quiver_denied_client_t',
+    [switch]$SecpolGenerate,
     [switch]$KeepWork
 )
 
 $ErrorActionPreference = 'Stop'
+if ($SecpolGenerate -and $ActivePolicySource) {
+    throw '-SecpolGenerate cannot be combined with -ActivePolicySource'
+}
 $buscfgModule = if ($Buscfg2) {
     '/lib/dll/pci/pci_server-buscfg2-hotplug.so'
 } else {
@@ -27,12 +36,27 @@ if ($SupervisorMode -and (-not $IncludeServices -or $BaselinePciServer)) {
 if ($PciOnly -and ($IncludeServices -or $SupervisorMode -or $BaselinePciServer -or $Buscfg2)) {
     throw '-PciOnly requires the standard hotplug PCI profile without Quiver services'
 }
+if ($ActivePolicySource -and ($BaselinePciServer -or $PciOnly -or $EventHandlerOnly)) {
+    throw '-ActivePolicySource requires the full test PCI profile with the resident Quiver manager or supervisor'
+}
+foreach ($typeName in @($PciServerType, $QuiverManagerType, $DeniedClientType)) {
+    if ($typeName -notmatch '^[A-Za-z_][A-Za-z0-9_]*$') {
+        throw "Invalid security policy type name: $typeName"
+    }
+}
+if ($PciServerType -eq $QuiverManagerType -or
+    $DeniedClientType -in @($PciServerType, $QuiverManagerType)) {
+    throw 'PCI server, Quiver manager, and denied-client tests must use distinct policy types'
+}
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 if (-not $OutputIfs) {
     $OutputIfs = Join-Path $projectRoot 'build\ifs-hotplug-test.bin'
 }
 $qnxHost = Join-Path $QnxBase 'host\win64\x86_64'
 $qnxTarget = Join-Path $QnxBase 'target\qnx'
+$env:QNX_HOST = $qnxHost
+$env:QNX_TARGET = $qnxTarget
+$env:PROCESSOR = 'x86_64'
 $dumpifs = Join-Path $qnxHost 'usr\bin\dumpifs.exe'
 $mkifs = Join-Path $qnxHost 'usr\bin\mkifs.exe'
 $qcc = Join-Path $qnxHost 'usr\bin\qcc.exe'
@@ -110,7 +134,7 @@ foreach ($relativePath in $sourcePaths) {
 
 $targetRoot = Join-Path $qnxTarget 'x86_64'
 foreach ($relativePath in @(
-        'boot/sys/multiboot.boot', 'boot/sys/startup-x86',
+        'boot/sys/multiboot.boot', 'boot/sys/startup-x86', 'bin/secpolpush',
         'boot/sys/procnto-smp-instr', 'sbin/pci-server',
         'lib/libpci.so.3.0', 'lib/libpci_hw_common.so.3.0',
         'lib/dll/pci/pci_hw-Intel_x86.so', 'lib/dll/pci/pci_slog2.so',
@@ -121,6 +145,8 @@ foreach ($relativePath in @(
         'lib/dll/pci/pci_server-event_handler.so',
         'lib/dll/pci/pci_server-buscfg-hotplug.so',
         'lib/dll/pci/pci_server-buscfg2-hotplug.so',
+        'bin/secpolgenerate',
+        'bin/secpolmonitor',
         'usr/lib/libncurses.so.6', 'usr/lib/libpanelw.so.6',
         'usr/sbin/pci-tool')) {
     $sourcePath = Join-Path $targetRoot ($relativePath.Replace('/', '\'))
@@ -145,16 +171,36 @@ foreach ($name in @('multiboot.boot', 'startup-x86', 'procnto-smp-instr')) {
 Copy-Item -LiteralPath (Join-Path $targetRoot 'boot\sys\procnto-smp-instr') -Destination (Join-Path $sourceRoot 'procnto-smp-instr') -Force
 
 $testComponents = if ($BaselinePciServer -or $PciOnly) { @() } else { @('quiver-pci-rm', 'quiver-pci-db-probe', 'pci_hotplug_wait.sh', 'pci_hotplug_cycle.sh') }
+$policyProbeComponents = if ($ActivePolicySource) {
+    @('quiver-client-probe', 'quiver-client-denied-probe')
+} else { @() }
 $serviceComponents = if ($IncludeServices) {
     @('quiver-client-probe', 'dev-can-quiver', 'quiver-can-probe', 'quiver-can-saturation-probe',
       'quiver-imu', 'quiver-actuator', 'quiver-trace',
       'quiver-controller', 'quiver-supervisor')
 } else { @() }
 $testComponents += $serviceComponents
+$testComponents += $policyProbeComponents
+if ($ActivePolicySource) {
+    $deniedProbeSource = Join-Path $projectRoot 'qnx\dev-quiver\denied_client_probe.c'
+    $deniedProbeBuild = Join-Path $projectRoot 'build\quiver-client-denied-probe'
+    if (-not (Test-Path -LiteralPath $deniedProbeBuild)) {
+        $deniedProbeBuild = Join-Path $workRoot 'quiver-client-denied-probe'
+        $deniedProbeCompileSource = Join-Path $sourceRoot 'quiver-client-denied-probe.c'
+        Copy-Item -LiteralPath $deniedProbeSource -Destination $deniedProbeCompileSource -Force
+        & $qcc -Vgcc_ntox86_64 -std=c11 -D_QNX_SOURCE -Wall -Wextra -Werror -O2 `
+            -o $deniedProbeBuild $deniedProbeCompileSource
+        if ($LASTEXITCODE -ne 0) {
+            throw "Could not build the QNX denied-client policy probe (exit $LASTEXITCODE)"
+        }
+    }
+}
 foreach ($relativePath in $testComponents) {
     $sourcePath = switch ($relativePath) {
         'quiver-pci-rm' { Join-Path $projectRoot 'build\quiver-pci-rm' }
         'quiver-pci-db-probe' { Join-Path $projectRoot 'build\quiver-pci-db-probe' }
+        'quiver-client-probe' { Join-Path $projectRoot 'build\quiver-client-probe' }
+        'quiver-client-denied-probe' { $deniedProbeBuild }
         { $_ -in $serviceComponents } { Join-Path $projectRoot (Join-Path 'build' $relativePath) }
         default { Join-Path $projectRoot (Join-Path 'qnx' $relativePath) }
     }
@@ -213,9 +259,68 @@ if (-not $BaselinePciServer) {
     if (-not $PciOnly) {
         $moduleManifest += "`r`nquiver-pci-rm`r`nquiver-pci-db-probe`r`npci_hotplug_wait.sh`r`npci_hotplug_cycle.sh"
     }
-    foreach ($component in $serviceComponents) {
+    foreach ($component in ($serviceComponents + $policyProbeComponents | Select-Object -Unique)) {
         $moduleManifest += "`r`n$component"
     }
+}
+if ($ActivePolicySource) {
+    $policyPath = (Resolve-Path -LiteralPath $ActivePolicySource).Path
+    $policyText = Get-Content -LiteralPath $policyPath -Raw
+    if ($policyText -notmatch ('(?m)^\s*type\s+' + [regex]::Escape($PciServerType) + '\s*;')) {
+        throw "The full policy source must declare PCI-server type $PciServerType; set -PciServerType if the image uses another name"
+    }
+    $quiverTypeDeclared = $policyText -match ('(?m)^\s*type\s+' + [regex]::Escape($QuiverManagerType) + '\s*;')
+    if ($PolicySourceIncludesQuiver -and -not $quiverTypeDeclared) {
+        throw "-PolicySourceIncludesQuiver was set, but the source does not declare $QuiverManagerType"
+    }
+    if (-not $PolicySourceIncludesQuiver -and $quiverTypeDeclared) {
+        throw "The policy source already declares Quiver manager type $QuiverManagerType; pass -PolicySourceIncludesQuiver or use the target policy before Quiver integration"
+    }
+    if ($policyText -match ('(?m)^\s*type\s+' + [regex]::Escape($DeniedClientType) + '\s*;')) {
+        throw "The policy source already declares the negative-test type $DeniedClientType; select an unused name with -DeniedClientType"
+    }
+    $secpolcompile = Join-Path $qnxHost 'usr\bin\secpolcompile.exe'
+    if (-not (Test-Path -LiteralPath $secpolcompile)) {
+        throw "QNX secpolcompile is missing: $secpolcompile"
+    }
+    $policyBinary = Join-Path $workRoot 'secpol.bin'
+    $policyInputs = @($policyPath)
+    if (-not $PolicySourceIncludesQuiver) {
+        $quiverPolicySource = Join-Path $projectRoot 'qnx\security\qnx_quiver.policy'
+        $quiverPolicy = Join-Path $workRoot 'qnx_quiver.policy'
+        $quiverPolicyText = [System.IO.File]::ReadAllText($quiverPolicySource)
+        if ($QuiverManagerType -ne 'quiver_pci_t') {
+            $quiverPolicyText = $quiverPolicyText.Replace('quiver_pci_t', $QuiverManagerType)
+        }
+        [System.IO.File]::WriteAllText($quiverPolicy, $quiverPolicyText,
+            [System.Text.Encoding]::ASCII)
+        $policyInputs += $quiverPolicy
+    }
+    $pciRule = "allow $QuiverManagerType $PciServerType : channel connect;"
+    $pciRulePattern = '(?m)^\s*allow\s+' + [regex]::Escape($QuiverManagerType) +
+        '\s+' + [regex]::Escape($PciServerType) + '\s*:\s*channel\s+connect\s*;\s*$'
+    $policyOverlay = Join-Path $workRoot 'qnx_quiver_policy_overlay.policy'
+    $overlayRules = @()
+    if ($policyText -notmatch $pciRulePattern) {
+        $overlayRules += $pciRule
+    }
+    $overlayRules += @(
+        'allow quiver_can_client_t self:ability { pathspace prot_exec };',
+        'allow_attach quiver_can_client_t /proc/boot/quiver-client-probe quiver_can_client_t;',
+        "type $DeniedClientType;",
+        "allow $DeniedClientType self:ability { pathspace prot_exec };",
+        "allow_attach $DeniedClientType /proc/boot/quiver-client-denied-probe $DeniedClientType;"
+    )
+    Set-Content -LiteralPath $policyOverlay -Value $overlayRules -Encoding Ascii
+    $policyInputs += $policyOverlay
+    & $secpolcompile -o $policyBinary @policyInputs
+    if ($LASTEXITCODE -ne 0) {
+        throw "secpolcompile rejected the active policy (exit $LASTEXITCODE)"
+    }
+    Copy-Item -LiteralPath $policyBinary -Destination (Join-Path $sourceRoot 'secpol.bin') -Force
+    $moduleManifest += "`r`nsecpol.bin`r`nbin/secpolpush=bin/secpolpush`r`nbin/secpolmonitor=bin/secpolmonitor"
+} elseif ($SecpolGenerate) {
+    $moduleManifest += "`r`nsecpolgenerate=bin/secpolgenerate`r`nbin/secpolmonitor=bin/secpolmonitor"
 }
 $manifest = [regex]::Replace($manifest, '(?m)^sbin/pci-server\s*$', '$0' + "`r`n$moduleManifest", 1)
 if (-not $BaselinePciServer -and -not $PciOnly -and $manifest -notmatch '(?m)^quiver-pci-rm\s*$') {
@@ -227,13 +332,48 @@ Set-Content -LiteralPath $manifestPath -Value $manifest -Encoding Ascii
 $startupPath = Join-Path $buildFiles 'startup.sh'
 $startup = Get-Content -LiteralPath $startupPath -Raw
 $startup = [regex]::Replace($startup, '(?m)^(#!.*)$', '$1' + "`r`nexport TERMINFO=/proc/boot/terminfo", 1)
+$policyStartupPattern = '(?m)^\s*slogger2\s+-U\s+'
+if ($ActivePolicySource) {
+    if ($startup -notmatch $policyStartupPattern) {
+        throw 'Could not find the first persistent service startup location for secpolpush'
+    }
+    $startup = [regex]::Replace($startup, $policyStartupPattern,
+        "/proc/boot/bin/secpolpush`r`n`$0", 1)
+    $pciStartPattern = '(?m)^\s*pci-server\s+--aspace-enable\s+--config=/proc/boot/pci_server\.cfg\s*$'
+    if ($startup -notmatch $pciStartPattern) {
+        throw 'Could not find the PCI-server startup command for typed policy launch'
+    }
+    $startup = [regex]::Replace($startup, $pciStartPattern,
+        " on -T $PciServerType pci-server --aspace-enable --config=/proc/boot/pci_server.cfg", 1)
+} elseif ($SecpolGenerate) {
+    if ($startup -notmatch $policyStartupPattern) {
+        throw 'Could not find the first persistent service startup location for secpolgenerate'
+    }
+    $startup = [regex]::Replace($startup, $policyStartupPattern,
+        "/proc/boot/secpolgenerate -N -u -f 1`r`nwaitfor /dev/secpolgenerate/policy`r`n`$0", 1)
+}
 $startupPattern = '(?m)^(\s*chmod a\+rx /dev/pci/server_id_1)\s*$'
 if ($startup -notmatch $startupPattern) {
     throw 'Could not find the point after PCI-server startup in startup.sh'
 }
-if (-not $BaselinePciServer -and -not $SupervisorMode -and -not $PciOnly) {
-    $startup = [regex]::Replace($startup, $startupPattern,
-        '$1' + "`r`n`r`necho `"---> Starting QNX-Quiver PCI resource manager`"`r`n /proc/boot/quiver-pci-rm &", 1)
+if (-not $BaselinePciServer -and -not $PciOnly) {
+    if ($SupervisorMode) {
+        $supervisorLaunch = if ($ActivePolicySource) {
+            'on -T quiver_supervisor_t /proc/boot/quiver-supervisor /proc/boot &'
+        } else {
+            '/proc/boot/quiver-supervisor /proc/boot &'
+        }
+        $startup = [regex]::Replace($startup, $startupPattern,
+            '$1' + "`r`n`r`necho `"---> Starting QNX-Quiver supervisor`"`r`n $supervisorLaunch", 1)
+    } else {
+        $managerLaunch = if ($ActivePolicySource) {
+            "on -T $QuiverManagerType /proc/boot/quiver-pci-rm &"
+        } else {
+            '/proc/boot/quiver-pci-rm &'
+        }
+        $startup = [regex]::Replace($startup, $startupPattern,
+            '$1' + "`r`n`r`necho `"---> Starting QNX-Quiver PCI resource manager`"`r`n $managerLaunch", 1)
+    }
 }
 if ($PciOnly) {
     $pciServerPattern = '(?m)^\s*pci-server --aspace-enable --config=/proc/boot/pci_server\.cfg\s*$'
@@ -247,9 +387,6 @@ Set-ItemProperty -LiteralPath $startupPath -Name IsReadOnly -Value $false
 $startup = $startup.Replace("`r`n", "`n").Replace("`r", "`n")
 [System.IO.File]::WriteAllText($startupPath, $startup, [System.Text.Encoding]::ASCII)
 
-$env:QNX_HOST = $qnxHost
-$env:QNX_TARGET = $qnxTarget
-$env:PROCESSOR = 'x86_64'
 $env:MKFS_PATH = $sourceRoot
 $imageInWork = Join-Path $workRoot 'ifs-hotplug-test.bin'
 Push-Location $buildRoot
@@ -262,7 +399,13 @@ try {
 
 $verifyDir = Join-Path $workRoot 'verify'
 New-Item -ItemType Directory -Force -Path $verifyDir | Out-Null
-& $dumpifs -d $verifyDir -f '/proc/boot/pci_server.cfg' -f '/proc/boot/startup.sh' $imageInWork
+$verifyArgs = @('-d', $verifyDir, '-f', '/proc/boot/pci_server.cfg',
+    '-f', '/proc/boot/startup.sh')
+if ($ActivePolicySource) {
+    $verifyArgs += @('-f', '/proc/boot/secpol.bin',
+        '-f', '/proc/boot/bin/secpolpush', '-f', '/proc/boot/bin/secpolmonitor')
+}
+& $dumpifs @verifyArgs $imageInWork
 if ($LASTEXITCODE -ne 0) { throw "Could not inspect the built IFS (exit $LASTEXITCODE)" }
 $configPath = Join-Path $verifyDir 'proc\boot\pci_server.cfg'
 $startupCheckPath = Join-Path $verifyDir 'proc\boot\startup.sh'
@@ -285,6 +428,28 @@ if (-not $BaselinePciServer -and -not $SupervisorMode -and -not $PciOnly) {
     foreach ($required in @('/proc/boot/quiver-pci-rm &')) {
         if (-not $startupCheck.Contains($required)) {
             throw "Built IFS startup is missing: $required"
+        }
+    }
+}
+if ($ActivePolicySource) {
+    if (-not $startupCheck.Contains('secpolpush')) {
+        throw 'Built IFS startup is missing secpolpush'
+    }
+    if (-not $startupCheck.Contains("on -T $PciServerType pci-server")) {
+        throw 'Built IFS does not launch pci-server under its requested policy type'
+    }
+    if (-not $SupervisorMode -and -not $startupCheck.Contains("on -T $QuiverManagerType /proc/boot/quiver-pci-rm")) {
+        throw 'Built IFS does not launch the Quiver manager under its requested policy type'
+    }
+    if ($SupervisorMode -and -not $startupCheck.Contains("on -T quiver_supervisor_t /proc/boot/quiver-supervisor")) {
+        throw 'Built IFS does not launch the Quiver supervisor under quiver_supervisor_t'
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $verifyDir 'proc\boot\secpol.bin'))) {
+        throw 'Built IFS is missing /proc/boot/secpol.bin'
+    }
+    foreach ($policyTool in @('secpolpush', 'secpolmonitor')) {
+        if (-not (Test-Path -LiteralPath (Join-Path $verifyDir ("proc\boot\bin\$policyTool")))) {
+            throw "Built IFS is missing /proc/boot/bin/$policyTool"
         }
     }
 }

@@ -29,8 +29,33 @@ case "$pci_topology" in
             -device "ivshmem-plain,memdev=qnx_shm,bus=quiver_bridge,id=quiver_ivshmem"
         )
         ;;
+    pcie-root-port)
+        # Candidate native PCIe hotplug path. This is experimental with the
+        # supplied QNX PCI server; use a disposable guest snapshot.
+        rootport_chassis="$(printenv QNX_PCIE_ROOTPORT_CHASSIS || printf '1')"
+        rootport_slot="$(printenv QNX_PCIE_ROOTPORT_SLOT || printf '1')"
+        case "$rootport_chassis" in *[!0-9]*|'')
+            printf 'QNX_PCIE_ROOTPORT_CHASSIS must be a positive integer.\n' >&2
+            exit 2 ;;
+        esac
+        case "$rootport_slot" in *[!0-9]*|'')
+            printf 'QNX_PCIE_ROOTPORT_SLOT must be a positive integer.\n' >&2
+            exit 2 ;;
+        esac
+        if (( ${#rootport_chassis} > 3 || ${#rootport_slot} > 2 ||
+             10#$rootport_chassis < 1 || 10#$rootport_chassis > 255 ||
+             10#$rootport_slot < 1 || 10#$rootport_slot > 31 )); then
+            printf 'PCIe root-port chassis must be 1..255 and slot 1..31.\n' >&2
+            exit 2
+        fi
+        machine_args=(-machine q35)
+        ivshmem_args=(
+            -device "pcie-root-port,id=quiver_rootport,bus=pcie.0,chassis=$rootport_chassis,slot=$rootport_slot"
+            -device "ivshmem-plain,memdev=qnx_shm,bus=quiver_rootport,id=quiver_ivshmem"
+        )
+        ;;
     *)
-        printf 'Unsupported QNX_PCI_TOPOLOGY=%s (use legacy or pci-bridge-hotplug).\n' "$pci_topology" >&2
+        printf 'Unsupported QNX_PCI_TOPOLOGY=%s (use legacy, pci-bridge-hotplug, or pcie-root-port).\n' "$pci_topology" >&2
         exit 2
         ;;
 esac

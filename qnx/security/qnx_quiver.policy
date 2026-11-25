@@ -7,11 +7,23 @@ type quiver_imu_t;
 type quiver_actuator_t;
 type quiver_trace_t;
 type quiver_controller_t;
+type quiver_supervisor_t;
+
+# Supervisor: spawn Quiver services under their distinct least-privilege types.
+allow quiver_supervisor_t self:ability {
+    pathspace
+    prot_exec
+    settypeid:quiver_pci_t
+    settypeid:quiver_can_t
+    settypeid:quiver_imu_t
+    settypeid:quiver_trace_t
+};
+allow quiver_supervisor_t quiver_pci_t : channel connect;
 
 # PCI resource manager: claim/map the device through pci-server and publish
 # only the client API node. PCI-server channel-connect permission is BSP/image
 # specific; add the exact pci-server type observed with secpolmonitor.
-allow quiver_pci_t self:ability { io public_channel pathspace };
+allow quiver_pci_t self:ability { io mem_phys public_channel pathspace };
 allow_attach quiver_pci_t /dev/quiver quiver_pci_t;
 mount_point 0 : 0 rw-rw---- /dev/quiver;
 

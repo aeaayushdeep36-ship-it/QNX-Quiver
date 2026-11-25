@@ -1,0 +1,101 @@
+# Target security policy for the disposable QEMU QNX 8.0 x86_64 guest,
+# derived from secpolgenerate observation of boot and Quiver workloads.
+# This policy types pci-server separately from default so Quiver's
+# quiver_pci_t can be granted narrow channel-connect access to pci_server_t.
+
+type default;
+type pci_server_t;
+
+ability iofunc/chown allow { root };
+ability iofunc/read allow { root };
+ability iofunc/dup allow { root };
+ability iofunc/exec allow { };
+ability vfs/mount-blk allow { root };
+ability vfs/pregrow allow { root };
+ability vfs/relearn allow { root };
+ability vfs/stats-clear allow { root };
+ability vfs/fs-control allow { root };
+ability network/privport allow { root };
+ability network/rawsocket allow { root };
+ability network/reuseport allow { root };
+ability network/ipsec allow { root };
+ability network/admin allow { root };
+ability network/jailroot allow { root nonroot };
+
+# Default OS services running untyped under the base startup script.
+allow default pci_server_t : channel connect;
+
+allow_attach default {
+    /dev/slog
+    /dev/slog2/notify
+    /dev/slog2/stdout
+    /dev/slog2/stderr
+    /dev/console
+    /dev/ser1
+    /dev/ser2
+    /dev/fsmgr
+    /dev/fsnotify
+    mount:/
+    /dev/hd0
+    /dev/hd0t177
+    /dev/hd0t178
+    /dev/hd0t179
+    /boot
+    /system
+    /data
+    /dev/random
+    /dev/urandom
+    pipe:/
+    /dev/pipe
+    /dev/ttyp0
+    /dev/ptyp0
+    /dev/ttyp1
+    /dev/ptyp1
+    /dev/ttyp2
+    /dev/ptyp2
+    /dev/ttyp3
+    /dev/ptyp3
+    /dev/ttyp4
+    /dev/ptyp4
+    /dev/ttyp5
+    /dev/ptyp5
+    /dev/ttyp6
+    /dev/ptyp6
+    /dev/ttyp7
+    /dev/ptyp7
+    dumper+:/proc/dumper
+    socket+:/dev/socket/1
+    socket+:/dev/socket/2
+    socket+:/dev/socket/28
+    socket+:/dev/socket/17
+    socket+:/dev/socket/38
+    socket+:/dev/socket/27
+    /dev/tun
+    /dev/tap
+    /dev/vmnet
+    /dev/io-sock
+};
+
+# PCI server process type.
+allow pci_server_t self:ability {
+    io
+    public_channel
+    pathspace
+    rsrcdbmgr
+    mem_phys
+    mem_lock
+    map_fixed
+    interrupt
+    prot_exec
+    nonroot
+};
+allow_attach pci_server_t all+:/dev/pci/server_id_1 pci_server_t;
+
+# Allow default root tools (including secpolmonitor) to operate in this test policy.
+allow default self:ability {
+    trace
+    public_channel
+    pathspace
+    prot_exec
+    nonroot
+};

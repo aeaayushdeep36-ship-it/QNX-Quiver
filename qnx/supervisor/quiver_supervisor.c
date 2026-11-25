@@ -1,6 +1,8 @@
 #include <errno.h>
 #include <fcntl.h>
+#include <secpol/secpol.h>
 #include <signal.h>
+#include <spawn.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -10,6 +12,8 @@
 #include <time.h>
 #include <unistd.h>
 
+extern char **environ;
+
 #define CHILD_COUNT 4u
 #define PATH_CAPACITY 512u
 #define INITIAL_RESTART_MS 250u
@@ -18,6 +22,7 @@
 
 typedef struct {
     const char *name;
+    const char *secpol_type;
     char path[PATH_CAPACITY];
     char *argv[4];
     pid_t pid;
@@ -46,24 +51,36 @@ static void sleep_ms(unsigned ms)
 
 static int start_child(child_t *child)
 {
-    pid_t pid = fork();
-    if (pid == -1) {
-        fprintf(stderr, "QNX-Quiver supervisor: fork %s: %s\n",
-                child->name, strerror(errno));
+    posix_spawnattr_t attr;
+    int rc = posix_spawnattr_init(&attr);
+    if (rc != 0) {
+        fprintf(stderr, "QNX-Quiver supervisor: spawnattr_init %s: %s\n",
+                child->name, strerror(rc));
         return -1;
     }
-    if (pid == 0) {
-        execv(child->path, child->argv);
-        dprintf(STDERR_FILENO, "QNX-Quiver supervisor: exec %s: %s\n",
-                child->path, strerror(errno));
-        _exit(127);
+    if (child->secpol_type != NULL &&
+        secpol_posix_spawnattr_settypeid(NULL, &attr, child->secpol_type,
+                                         SECPOL_TYPE_NAME) == -1) {
+        fprintf(stderr, "QNX-Quiver supervisor: secpol type %s for %s: %s\n",
+                child->secpol_type, child->name, strerror(errno));
+        (void)posix_spawnattr_destroy(&attr);
+        return -1;
+    }
+    pid_t pid = -1;
+    rc = posix_spawn(&pid, child->path, NULL, &attr, child->argv, environ);
+    (void)posix_spawnattr_destroy(&attr);
+    if (rc != 0) {
+        fprintf(stderr, "QNX-Quiver supervisor: posix_spawn %s (%s): %s\n",
+                child->name, child->path, strerror(rc));
+        return -1;
     }
     child->pid = pid;
     child->started_at_ns = monotonic_ns();
     child->wait_status = 0;
     child->wait_observed = 0;
-    printf("QNX-Quiver supervisor: started %s pid=%ld\n",
-           child->name, (long)pid);
+    printf("QNX-Quiver supervisor: started %s pid=%ld type=%s\n",
+           child->name, (long)pid,
+           child->secpol_type != NULL ? child->secpol_type : "inherited");
     return 0;
 }
 
@@ -214,13 +231,17 @@ int main(int argc, char **argv)
                 "QNX-Quiver supervisor: no writable trace directory (/tmp or /dev/shmem)\n");
         return EXIT_FAILURE;
     }
-    child_t pci = {.name = "PCI resource manager", .pid = -1,
-                   .restart_delay_ms = INITIAL_RESTART_MS};
+    child_t pci = {.name = "PCI resource manager", .secpol_type = "quiver_pci_t",
+                   .pid = -1, .restart_delay_ms = INITIAL_RESTART_MS};
     child_t children[CHILD_COUNT] = {
-        {.name = "CAN RX", .pid = -1, .restart_delay_ms = INITIAL_RESTART_MS},
-        {.name = "CAN TX", .pid = -1, .restart_delay_ms = INITIAL_RESTART_MS},
-        {.name = "IMU consumer", .pid = -1, .restart_delay_ms = INITIAL_RESTART_MS},
-        {.name = "trace capture", .pid = -1, .restart_delay_ms = INITIAL_RESTART_MS}
+        {.name = "CAN RX", .secpol_type = "quiver_can_t", .pid = -1,
+         .restart_delay_ms = INITIAL_RESTART_MS},
+        {.name = "CAN TX", .secpol_type = "quiver_can_t", .pid = -1,
+         .restart_delay_ms = INITIAL_RESTART_MS},
+        {.name = "IMU consumer", .secpol_type = "quiver_imu_t", .pid = -1,
+         .restart_delay_ms = INITIAL_RESTART_MS},
+        {.name = "trace capture", .secpol_type = "quiver_trace_t", .pid = -1,
+         .restart_delay_ms = INITIAL_RESTART_MS}
     };
     (void)snprintf(pci.path, sizeof(pci.path), "%s/quiver-pci-rm", bin_dir);
     pci.argv[0] = pci.path;
