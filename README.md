@@ -8,6 +8,10 @@ The project includes protocol v3, a resident PCI resource manager with PCI-serve
 
 ## Build and host checks
 
+- **QNX Version**: QNX SDP 8.0 (`qnx800`)
+- **Target Architecture**: QEMU `x86_64` (`pc` / `i440fx` and `q35`)
+- **Toolchain**: `qcc -Vgcc_ntox86_64`, GNU `Make`, QNX CAN DDK (`-lcan`), QNX PCI (`-lpci`), QNX Security Policy (`-lsecpol`, `secpolcompile`), `slog2` (`-lslog2`)
+
 From the QNX SDP 8.0 environment, run:
 
 ```sh
@@ -60,3 +64,18 @@ Run one IMU-ring consumer at a time: `build/quiver-imu` or `build/quiver-control
 - `qemu/`, `tests/`, and `codelab/`: launchers, host/QMP tests, and clean-environment handoff.
 
 Protocol format and ownership rules are in [docs/protocol.md](docs/protocol.md). The project name is QNX-Quiver; QVB1 and device IDs are technical protocol/platform identifiers.
+
+## Evidence of QNX Use & QNX-Specific Technologies
+
+QNX-Quiver is built natively for **QNX SDP 8.0 (`x86_64`)** and uses QNX-specific microkernel, driver, and security primitives throughout:
+
+| QNX Technology | Implementation & Exact Files | APIs / Buildflags |
+|---|---|---|
+| **QNX Resource Manager** | [qnx/dev-quiver/pci_rm.c](qnx/dev-quiver/pci_rm.c) | `dispatch_create_channel()`, `secpol_resmgr_attach()` publishing `/dev/quiver`, `io_devctl` handler, `ThreadCtl(_NTO_TCTL_IO, 0)`, `mmap_device_memory()` |
+| **QNX Microkernel Pulses & Timers** | [qnx/dev-quiver/pci_rm.c](qnx/dev-quiver/pci_rm.c) | `pulse_attach()`, `SIGEV_PULSE_INIT()`, `timer_create(CLOCK_MONOTONIC, ...)` for periodic PCI-server health & recovery checks |
+| **QNX CAN DDK (`-lcan`)** | [qnx/dev-can-quiver/quiver_can.c](qnx/dev-can-quiver/quiver_can.c), [Makefile](Makefile) | `can_drvr_funcs_t`, `can_drvr_register()`, split RX/TX `/dev/can0/rx0` & `/dev/can0/tx0`, CAN FD 64-byte frames, bus-off state |
+| **QNX PCI Server (`-lpci`)** | [qnx/dev-quiver/pci_rm.c](qnx/dev-quiver/pci_rm.c), [qnx/dev-quiver/pci_service.c](qnx/dev-quiver/pci_service.c) | `pci_device_find()`, `pci_device_attach()`, `pci_device_read_ba()`, `pci_server-event_handler.so` |
+| **QNX Security Policies (`-lsecpol`)** | [qnx/supervisor/quiver_supervisor.c](qnx/supervisor/quiver_supervisor.c), [qnx/security/qnx_quiver.policy](qnx/security/qnx_quiver.policy), [qnx/security/qemu_target_base.policy](qnx/security/qemu_target_base.policy) | `secpol_posix_spawnattr_settypeid()`, `secpol_resmgr_attach()`, `secpolcompile`, `secpolpush`, `secpolgenerate`, `secpolmonitor`, immutable policy `9db957c2` |
+| **QNX System Logging (`-lslog2`) & Tracing** | [qnx/dev-can-quiver/quiver_can.c](qnx/dev-can-quiver/quiver_can.c), [qemu/build_hotplug_test_ifs.ps1](qemu/build_hotplug_test_ifs.ps1) | `slog2` logging, `slog2info`, `secpolmonitor` (`_tracelog`), `procnto-smp-instr` |
+
+Live QNX 8.0 QEMU verification outputs (including `pidin -f a_n`, `secpol -Q`, `quiver-client-probe`, `quiver-can-probe`, `quiver-actuator`, `quiver-client-denied-probe`, and `quiver-pci-db-probe`) are recorded in [docs/implementation-status.md](docs/implementation-status.md).
